@@ -1,0 +1,20 @@
+services:
+  bridge:
+    build: .
+    image: wa-immich-bridge:latest
+    # A fixed hostname lets the bridge recognise Chromium locks left by its own crashed runs.
+    hostname: wa-immich-bridge
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    volumes:
+      - ./data:/data
+    shm_size: 512mb
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

@@ -1,0 +1,22 @@
+{
+  "name": "wa-immich-bridge",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Imports photos and videos from a WhatsApp group into an Immich album",
+  "type": "module",
+  "engines": {
+    "node": ">=22.9"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/main.js",
+    "dry-run": "DRY_RUN=true RUN_ONCE=true node --env-file-if-exists=.env src/main.js",
+    "dry-run:fixtures": "DRY_RUN=true RUN_ONCE=true MESSAGE_SOURCE=fixtures FIXTURES_DIR=examples/fixtures node --env-file-if-exists=.env src/main.js",
+    "ctl": "node --env-file-if-exists=.env src/cli.js",
+    "test": "node --test \"test/**/*.test.js\""
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.4.1",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.34.1"
+  }
+}
