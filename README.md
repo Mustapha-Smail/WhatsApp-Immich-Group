@@ -240,6 +240,7 @@ The tests use Node's built-in runner (`node:test`) and run in about a second. Th
 
 | Symptom | Fix |
 | --- | --- |
+| Photos land in another Immich account | A variable exported in your shell (e.g. `IMMICH_API_KEY` in `~/.zshrc`) overrides `.env`. The bridge warns `Using values from your shell instead of .env`; `npm run ctl doctor` lists them. Unset them, or use Docker, which only reads `.env` |
 | `Data directory /data is not writable` | `sudo chown -R 1000:1000 data` |
 | `Immich rejected IMMICH_API_KEY (401)` | Create a new key; check for copy/paste whitespace |
 | `IMMICH_API_KEY lacks permissions` | Edit the key and add the four permissions above |
@@ -252,22 +253,18 @@ The tests use Node's built-in runner (`node:test`) and run in about a second. Th
 
 ### WhatsApp Web incompatibility
 
-whatsapp-web.js works by calling WhatsApp Web's internal code, which WhatsApp changes without notice. Since mid-2026 WhatsApp Web builds (2.3000.104x and later), `whatsapp-web.js@1.34.7` fails with a minified error `r` when it loads chat or group details ([issue #201838](https://github.com/wwebjs/whatsapp-web.js/issues/201838)). For the bridge this means:
+whatsapp-web.js works by calling WhatsApp Web's internal code, which WhatsApp changes without notice. Since mid-2026 WhatsApp Web builds (2.3000.104x and later), `whatsapp-web.js@1.34.7` has two problems:
 
-- **Listing groups** still works: the bridge falls back to a lighter lookup.
-- **History import** (`getChatById` / `fetchMessages`) fails until whatsapp-web.js is fixed.
+- It fails with a minified error `r` when loading chat or group details ([issue #201838](https://github.com/wwebjs/whatsapp-web.js/issues/201838)).
+- Message ids arrive under `$1` instead of `_serialized`.
 
-Until a fixed release is published, apply the community fix from [PR #201850](https://github.com/wwebjs/whatsapp-web.js/pull/201850). It only changes how message ids are read and skips chats that fail to load; it makes no network calls. To apply it:
+The bridge works around both in its own adapter (`src/adapters/whatsapp/whatsappSource.js`):
 
-```bash
-npm install --save patch-package@8
-curl -fL https://github.com/wwebjs/whatsapp-web.js/pull/201850.diff -o /tmp/wwebjs-201850.diff
-(cd node_modules/whatsapp-web.js && patch -p1 < /tmp/wwebjs-201850.diff)
-npx patch-package whatsapp-web.js       # saves patches/whatsapp-web.js+1.34.7.patch
-npm pkg set scripts.postinstall=patch-package
-```
+- **Listing groups:** if `getChats()` fails, the bridge reads ids and names straight from WhatsApp Web's chat list.
+- **History:** fetched with the same steps as `getChatById()` + `fetchMessages()`, minus the group-metadata lookup that fails.
+- **Message ids:** `$1` is accepted, and `_serialized` is restored so downloads work, both for history and for live messages.
 
-For Docker, also add `COPY patches ./patches` right before `RUN npm ci` in the `Dockerfile`. When whatsapp-web.js publishes a release containing the fix, delete `patches/`, remove the `postinstall` script and update the package.
+If WhatsApp Web changes again, a minified error like `r` will point you here. Check the whatsapp-web.js issues for a newer release, then `npm update whatsapp-web.js`. The community fix in [PR #201850](https://github.com/wwebjs/whatsapp-web.js/pull/201850) covers the same problems inside the library, if you prefer patching it (e.g. with `patch-package`).
 
 ## Limitations
 

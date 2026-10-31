@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 import { FIXTURE_GROUP_ID } from '../src/adapters/fixtures/fixtureSource.js';
-import { ConfigError, assertRunnable, loadConfig } from '../src/config.js';
+import { ConfigError, assertRunnable, loadConfig, shadowedEnvVars } from '../src/config.js';
+import { tempDir } from './helpers.js';
 
 describe('config', () => {
   it('applies defaults', () => {
@@ -44,5 +46,13 @@ describe('config', () => {
     assert.doesNotThrow(() => assertRunnable(loadConfig({ DRY_RUN: 'true' })));
     assert.throws(() => assertRunnable(loadConfig({ DRY_RUN: 'true', IMMICH_URL: 'http://x' })), /both/);
     assert.doesNotThrow(() => assertRunnable(loadConfig({ IMMICH_URL: 'http://x', IMMICH_API_KEY: 'k' })));
+  });
+
+  it('detects .env values overridden by the shell', () => {
+    const file = path.join(tempDir(), '.env');
+    fs.writeFileSync(file, 'IMMICH_API_KEY=from-file\nALBUM_NAME=Journal de la famille\nDRY_RUN=false\n');
+    const env = { IMMICH_API_KEY: 'from-shell', ALBUM_NAME: 'Journal de la famille' };
+    assert.deepEqual(shadowedEnvVars(file, env), ['IMMICH_API_KEY']);
+    assert.deepEqual(shadowedEnvVars(path.join(tempDir(), 'missing.env'), env), []);
   });
 });

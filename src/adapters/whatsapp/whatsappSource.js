@@ -2,20 +2,103 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-/** Maps a whatsapp-web.js Message to the core's IncomingMessage; null when it has no media. */
-export function toIncomingMessage(msg) {
-  if (!msg?.hasMedia || !msg.id?._serialized) return null;
+/**
+ * Recent WhatsApp Web builds renamed the message key's `_serialized` to `$1`
+ * (whatsapp-web.js#201850). Restore `_serialized`, which whatsapp-web.js itself needs for downloadMedia().
+ */
+export function normalizeMessageId(msg) {
+  const id = msg?.id?._serialized ?? msg?.id?.$1;
+  if (id && msg.id._serialized == null) msg.id = { ...msg.id, _serialized: id };
+  return id;
+}
+
+async function libraryDownload(msg) {
+  const media = await msg.downloadMedia();
+  return media ? { mimetype: media.mimetype, data: Buffer.from(media.data, 'base64') } : null;
+}
+
+/**
+ * Maps a whatsapp-web.js Message to the core's IncomingMessage; null when it has no media.
+ * @param {(msg: object, chatId: string) => Promise<{mimetype: string, data: Buffer} | null>} [download]
+ */
+export function toIncomingMessage(msg, download = libraryDownload) {
+  if (!msg?.hasMedia) return null;
+  const id = normalizeMessageId(msg);
+  if (!id) return null;
+  // Messages we send carry the group in `to`; received ones carry it in `from`.
+  const chatId = msg.fromMe ? (msg.to || msg.from) : msg.from;
   return {
-    id: msg.id._serialized,
-    // Messages we send carry the group in `to`; received ones carry it in `from`.
-    chatId: msg.fromMe ? (msg.to || msg.from) : msg.from,
+    id,
+    chatId,
     kind: msg.type,
     timestamp: Number(msg.timestamp) || Math.floor(Date.now() / 1000),
-    download: async () => {
-      const media = await msg.downloadMedia();
-      return media ? { mimetype: media.mimetype, data: Buffer.from(media.data, 'base64') } : null;
-    },
+    download: () => download(msg, chatId),
   };
+}
+
+/**
+ * Runs inside WhatsApp Web. Same steps as whatsapp-web.js's Message.downloadMedia(), adapted to
+ * recent builds: the message is also looked up in its chat (ids with an @lid participant are not
+ * always found by Msg.get), the "resolve" step is best effort since decrypting only needs fields
+ * the message already has, and failures report the step and the real error.
+ */
+async function downloadInPage(msgId, chatId) {
+  const describe = e => ({
+    name: e?.name, message: String(e?.message ?? e), status: e?.status,
+    stack: String(e?.stack ?? '').split('\n').slice(0, 3).join(' | '),
+  });
+  const keyOf = m => m.id._serialized ?? m.id.$1 ?? String(m.id);
+  const collections = window.require('WAWebCollections');
+  let step = 'lookup';
+  let resolveError;
+  try {
+    let msg = collections.Msg.get(msgId);
+    if (!msg) {
+      const chat = await window.WWebJS.getChat(chatId, { getAsModel: false });
+      msg = chat?.msgs.getModelsArray().find(m => keyOf(m) === msgId);
+    }
+    if (!msg) {
+      step = 'lookup-db';
+      msg = (await collections.Msg.getMessagesById([msgId]))?.messages?.[0];
+    }
+    if (!msg) return { status: 'unavailable', reason: 'message not found' };
+    if (!msg.mediaData || msg.mediaData.mediaStage === 'REUPLOADING') return { status: 'unavailable', reason: 'media expired' };
+    if (msg.mediaData.mediaStage !== 'RESOLVED') {
+      step = 'resolve';
+      try {
+        await msg.downloadMedia({ downloadEvenIfExpensive: true, rmrReason: 1 });
+      } catch (e) {
+        resolveError = describe(e);
+      }
+    }
+    step = 'decrypt';
+    // Recent builds validate the file against `mimetype`, which defaults to application/octet-stream
+    // and fails with InvalidMediaFileType when omitted (whatsapp-web.js#201908).
+    const mockQpl = { addAnnotations() { return this; }, addPoint() { return this; } };
+    const decrypted = await window.require('WAWebDownloadManager').downloadManager.downloadAndMaybeDecrypt({
+      directPath: msg.directPath, encFilehash: msg.encFilehash, filehash: msg.filehash, mediaKey: msg.mediaKey,
+      mediaKeyTimestamp: msg.mediaKeyTimestamp, type: msg.type, mimetype: msg.mimetype, signal: new AbortController().signal, downloadQpl: mockQpl,
+    });
+    step = 'encode';
+    return { status: 'ok', mimetype: msg.mimetype, data: await window.WWebJS.arrayBufferToBase64Async(decrypted) };
+  } catch (e) {
+    if (e?.status === 404 || e?.status === 410) return { status: 'unavailable', reason: `media server returned ${e.status}` };
+    return { status: 'error', step, error: describe(e), resolveError };
+  }
+}
+
+/** Turns downloadInPage's result into the core's shape. */
+export function interpretDownload(result) {
+  if (result?.status === 'ok') return { mimetype: result.mimetype, data: Buffer.from(result.data, 'base64') };
+  if (result?.status === 'error') {
+    const { name, message, status } = result.error ?? {};
+    const detail = [name, message, status && `status ${status}`].filter(Boolean).join(': ');
+    const resolve = result.resolveError ? ` (resolve step also failed: ${result.resolveError.name}: ${result.resolveError.message})` : '';
+    const err = new Error(`Media download failed at step "${result.step}": ${detail}${resolve}`);
+    err.details = result;
+    throw err;
+  }
+  return null; // unavailable: expired or no longer on WhatsApp's servers
 }
 
 /**
@@ -81,7 +164,7 @@ export function explainWhatsAppError(err, action) {
 async function loadWhatsAppLibraries() {
   const { default: wweb } = await import('whatsapp-web.js');
   const { default: qrcode } = await import('qrcode-terminal');
-  return { Client: wweb.Client, LocalAuth: wweb.LocalAuth, qrcode };
+  return { Client: wweb.Client, LocalAuth: wweb.LocalAuth, Message: wweb.Message, qrcode };
 }
 
 /**
@@ -90,6 +173,7 @@ async function loadWhatsAppLibraries() {
  */
 export class WhatsAppSource {
   #client = null;
+  #Message = null;
   #messageHandlers = [];
   #disconnectHandlers = [];
 
@@ -101,6 +185,13 @@ export class WhatsAppSource {
   onMessage(handler) {
     this.#messageHandlers.push(handler);
   }
+
+  #download = async (msg, chatId) => {
+    if (!this.#client) throw new Error('WhatsApp is not connected');
+    const result = await this.#client.pupPage.evaluate(downloadInPage, msg.id._serialized, chatId);
+    if (result?.status === 'unavailable') this.logger.info('Media unavailable on WhatsApp', { id: msg.id._serialized, reason: result.reason });
+    return interpretDownload(result);
+  };
 
   onDisconnect(handler) {
     this.#disconnectHandlers.push(handler);
@@ -123,7 +214,8 @@ export class WhatsAppSource {
 
   async #connectOnce() {
     // Loaded lazily so tests and fixture runs never start Chromium.
-    const { Client, LocalAuth, qrcode } = await this.loadLibraries();
+    const { Client, LocalAuth, Message, qrcode } = await this.loadLibraries();
+    this.#Message = Message;
 
     for (const file of clearStaleChromiumLocks(this.authDir)) this.logger.warn('Removed stale Chromium lock', { file });
 
@@ -147,7 +239,7 @@ export class WhatsAppSource {
     client.once('authenticated', () => this.logger.info('WhatsApp authenticated'));
     // message_create also fires for messages we send ourselves.
     client.on('message_create', msg => {
-      const message = toIncomingMessage(msg);
+      const message = toIncomingMessage(msg, this.#download);
       if (message) for (const handler of this.#messageHandlers) handler(message);
     });
     client.on('disconnected', reason => {
@@ -175,16 +267,40 @@ export class WhatsAppSource {
     }
   }
 
+  /**
+   * Same steps as whatsapp-web.js's getChatById() + fetchMessages(), minus the group metadata
+   * lookup that breaks on recent WhatsApp Web builds (minified error "r", whatsapp-web.js#201838).
+   */
   async fetchHistory(groupId, limit = 0) {
+    if (!groupId.endsWith('@g.us')) throw new Error(`WHATSAPP_GROUP_ID ${groupId} is not a group id (expected ...@g.us)`);
+    let models;
     try {
-      const chat = await this.#client.getChatById(groupId);
-      if (!chat?.isGroup) throw new Error(`WHATSAPP_GROUP_ID ${groupId} is not a group`);
-      // Infinity asks for everything WhatsApp Web has synced, which is not necessarily full history.
-      const messages = await chat.fetchMessages({ limit: limit || Infinity });
-      return messages.map(toIncomingMessage).filter(Boolean);
+      models = await this.#client.pupPage.evaluate(async (chatId, limit) => {
+        const chat = await window.WWebJS.getChat(chatId, { getAsModel: false });
+        if (!chat) return null;
+        const keep = m => !m.isNotification;
+        let msgs = chat.msgs.getModelsArray().filter(keep);
+        // limit 0 = keep loading until WhatsApp Web has nothing older.
+        while (!limit || msgs.length < limit) {
+          const older = await window.require('WAWebChatLoadMessages').loadEarlierMsgs({ chat });
+          if (!older || !older.length) break;
+          msgs = [...older.filter(keep), ...msgs];
+        }
+        if (limit && msgs.length > limit) msgs = msgs.sort((a, b) => a.t - b.t).slice(-limit);
+        // Serialize only photos and videos; a group can hold many thousands of text messages.
+        return msgs.filter(m => m.type === 'image' || m.type === 'video').map(m => {
+          const model = window.WWebJS.getMessageModel(m);
+          if (model.id && model.id._serialized == null) {
+            model.id = { ...model.id, _serialized: m.id._serialized ?? m.id.$1 ?? String(m.id) };
+          }
+          return model;
+        });
+      }, groupId, limit);
     } catch (err) {
       throw explainWhatsAppError(err, 'the history request');
     }
+    if (!models) throw new Error(`WhatsApp chat ${groupId} not found; check WHATSAPP_GROUP_ID`);
+    return models.map(model => toIncomingMessage(new this.#Message(this.#client, model), this.#download)).filter(Boolean);
   }
 
   async disconnect() {

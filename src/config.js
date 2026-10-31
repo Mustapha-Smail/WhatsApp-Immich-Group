@@ -1,8 +1,25 @@
+import fs from 'node:fs';
 import path from 'node:path';
+import { parseEnv } from 'node:util';
 import { FIXTURE_GROUP_ID } from './adapters/fixtures/fixtureSource.js';
 
 export class ConfigError extends Error {
   name = 'ConfigError';
+}
+
+/**
+ * Names set in the env file that are overridden by a different value from the shell.
+ * `node --env-file` never overrides existing variables, so e.g. an IMMICH_API_KEY exported in
+ * ~/.zshrc silently wins over the one in .env.
+ */
+export function shadowedEnvVars(file = '.env', env = process.env) {
+  let fromFile;
+  try {
+    fromFile = parseEnv(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return [];
+  }
+  return Object.keys(fromFile).filter(name => env[name] !== undefined && env[name] !== fromFile[name]);
 }
 
 /** Parses and validates the environment. Reports every problem at once. */

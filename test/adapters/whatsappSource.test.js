@@ -4,7 +4,8 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { describe, it } from 'node:test';
 import {
-  WhatsAppSource, clearStaleChromiumLocks, explainWhatsAppError, isTransientError, toIncomingMessage,
+  WhatsAppSource, clearStaleChromiumLocks, explainWhatsAppError, interpretDownload, isTransientError, normalizeMessageId,
+  toIncomingMessage,
 } from '../../src/adapters/whatsapp/whatsappSource.js';
 import { silentLogger, tempDir } from '../helpers.js';
 
@@ -32,6 +33,24 @@ describe('toIncomingMessage', () => {
 
   it('uses the recipient as the chat for messages we sent', () => {
     assert.equal(toIncomingMessage(waMessage({ fromMe: true, from: '33600000000@c.us', to: '1203@g.us' })).chatId, '1203@g.us');
+  });
+
+  it('accepts the renamed message key ($1) and restores _serialized for downloadMedia', () => {
+    const msg = waMessage({ id: { fromMe: false, remote: '1203@g.us', id: 'ABC', $1: 'false_1203@g.us_ABC' } });
+    assert.equal(toIncomingMessage(msg).id, 'false_1203@g.us_ABC');
+    assert.equal(msg.id._serialized, 'false_1203@g.us_ABC');
+    assert.equal(normalizeMessageId({ id: {} }), undefined);
+  });
+
+  it('works with the real whatsapp-web.js Message class on a renamed key', async () => {
+    const { default: wweb } = await import('whatsapp-web.js');
+    const model = {
+      id: { fromMe: false, remote: '1203@g.us', id: 'ABC', $1: 'false_1203@g.us_ABC' },
+      from: '1203@g.us', to: '33600000000@c.us', type: 'video', t: 1_700_000_000, directPath: '/v/t62/xyz',
+    };
+    const message = toIncomingMessage(new wweb.Message({}, model));
+    assert.deepEqual({ id: message.id, chatId: message.chatId, kind: message.kind, timestamp: message.timestamp },
+      { id: 'false_1203@g.us_ABC', chatId: '1203@g.us', kind: 'video', timestamp: 1_700_000_000 });
   });
 
   it('returns null for messages without media and download null when media expired', async () => {
@@ -71,6 +90,12 @@ describe('clearStaleChromiumLocks', () => {
 
 /** Fake whatsapp-web.js: each `initialize` takes the next scripted outcome. */
 function fakeWhatsApp(outcomes, { getChats, evaluate } = {}) {
+  class Message {
+    constructor(client, data) {
+      Object.assign(this, { id: data.id, hasMedia: Boolean(data.directPath), from: data.from, to: data.to,
+        fromMe: data.id.fromMe, type: data.type, timestamp: data.t, downloadMedia: async () => null });
+    }
+  }
   const clients = [];
   class Client extends EventEmitter {
     constructor(options) {
@@ -92,7 +117,7 @@ function fakeWhatsApp(outcomes, { getChats, evaluate } = {}) {
   }
   const source = new WhatsAppSource({
     authDir: tempDir(), cacheDir: '/data/web-cache', logger: silentLogger(), retryDelayMs: 0,
-    loadLibraries: async () => ({ Client, LocalAuth: class {}, qrcode: { generate() {} } }),
+    loadLibraries: async () => ({ Client, LocalAuth: class {}, Message, qrcode: { generate() {} } }),
   });
   return { source, clients };
 }
@@ -127,6 +152,67 @@ describe('WhatsAppSource', () => {
     });
     await source.connect();
     assert.deepEqual(await source.listGroups(), [{ id: '1203@g.us', name: 'Family' }]);
+  });
+});
+
+describe('WhatsAppSource.fetchHistory', () => {
+  const model = (id, overrides = {}) => ({
+    id: { fromMe: false, remote: '1203@g.us', $1: id }, from: '1203@g.us', type: 'image', t: 1, directPath: '/p', ...overrides,
+  });
+
+  it('maps the history returned by WhatsApp Web, without loading group metadata', async () => {
+    let args;
+    const { source } = fakeWhatsApp(['ok'], {
+      evaluate: async (fn, ...rest) => { args = rest; return [model('a'), model('b', { directPath: undefined })]; },
+    });
+    await source.connect();
+    const messages = await source.fetchHistory('1203@g.us', 500);
+    assert.deepEqual(args, ['1203@g.us', 500]);
+    assert.deepEqual(messages.map(m => m.id), ['a']);
+  });
+
+  it('downloads media inside WhatsApp Web by message id and chat', async () => {
+    const calls = [];
+    const { source } = fakeWhatsApp(['ok'], {
+      evaluate: async (fn, ...args) => {
+        calls.push([fn.name, ...args]);
+        return fn.name === 'downloadInPage'
+          ? { status: 'ok', mimetype: 'image/jpeg', data: Buffer.from('jpeg').toString('base64') }
+          : [model('false_1203@g.us_AC6B_1331@lid')];
+      },
+    });
+    await source.connect();
+    const [message] = await source.fetchHistory('1203@g.us');
+    assert.deepEqual(await message.download(), { mimetype: 'image/jpeg', data: Buffer.from('jpeg') });
+    assert.deepEqual(calls[1], ['downloadInPage', 'false_1203@g.us_AC6B_1331@lid', '1203@g.us']);
+  });
+
+  it('rejects ids that are not groups and chats that do not exist', async () => {
+    const { source } = fakeWhatsApp(['ok'], { evaluate: async () => null });
+    await source.connect();
+    await assert.rejects(source.fetchHistory('33600000000@c.us'), /not a group id/);
+    await assert.rejects(source.fetchHistory('1203@g.us'), /not found/);
+  });
+
+  it('explains minified errors from WhatsApp Web', async () => {
+    const { source } = fakeWhatsApp(['ok'], { evaluate: async () => { throw new Error('r'); } });
+    await source.connect();
+    await assert.rejects(source.fetchHistory('1203@g.us'), /minified error "r"/);
+  });
+});
+
+describe('interpretDownload', () => {
+  it('decodes successful downloads and maps unavailable media to null', () => {
+    assert.deepEqual(interpretDownload({ status: 'ok', mimetype: 'video/mp4', data: 'aGk=' }), { mimetype: 'video/mp4', data: Buffer.from('hi') });
+    assert.equal(interpretDownload({ status: 'unavailable', reason: 'media expired' }), null);
+    assert.equal(interpretDownload(null), null);
+  });
+
+  it('reports the failing step and the real error', () => {
+    assert.throws(() => interpretDownload({
+      status: 'error', step: 'decrypt', error: { name: 'DataError', message: 'No key', status: 403 },
+      resolveError: { name: 't', message: 't' },
+    }), /step "decrypt": DataError: No key: status 403 \(resolve step also failed: t: t\)/);
   });
 });
 

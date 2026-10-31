@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { ImmichLibrary, REQUIRED_PERMISSIONS } from './adapters/immich/immichLibrary.js';
 import { SqliteJobRepository } from './adapters/sqlite/sqliteJobRepository.js';
-import { loadConfig } from './config.js';
+import { loadConfig, shadowedEnvVars } from './config.js';
 import { createLogger } from './logger.js';
 
 const USAGE = `Usage: node src/cli.js <command>
@@ -52,6 +52,10 @@ const commands = {
       ok &&= pass;
     };
     check(true, `Mode: ${config.dryRun ? 'dry-run' : 'live'}, source: ${config.source}, data: ${config.paths.dataDir}`);
+    const shadowed = shadowedEnvVars();
+    check(!shadowed.length, shadowed.length
+      ? `Your shell overrides .env for: ${shadowed.join(', ')} (unset them, e.g. in ~/.zshrc)`
+      : 'No shell variables override .env');
     check(Boolean(config.groupId), config.groupId ? `Group: ${config.groupId}` : 'WHATSAPP_GROUP_ID is not set (start the bridge once to list groups)');
     if (config.source === 'whatsapp') {
       check(fs.existsSync(config.paths.authDir), fs.existsSync(config.paths.authDir) ? 'WhatsApp session found' : 'No WhatsApp session yet (scan the QR code on first start)');
