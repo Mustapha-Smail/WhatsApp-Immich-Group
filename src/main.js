@@ -47,6 +47,6 @@ try {
     await shutdown(failed ? 1 : 0);
   }
 } catch (err) {
-  logger.error('Fatal error', { err });
+  logger.error('Fatal error', { err, stack: err?.cause?.stack ?? err?.stack });
   await shutdown(1);
 }

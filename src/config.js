@@ -50,11 +50,13 @@ export function loadConfig(env = process.env) {
     fixturesDir: fixturesDir && path.resolve(fixturesDir),
     groupId: str('WHATSAPP_GROUP_ID') ?? (source === 'fixtures' ? FIXTURE_GROUP_ID : undefined),
     chromiumPath: str('PUPPETEER_EXECUTABLE_PATH'),
+    whatsappTimeoutMs: int('WHATSAPP_TIMEOUT_MS', 600_000, 10_000),
     watchNewMessages: bool('WATCH_NEW_MESSAGES', true),
     paths: {
       dataDir,
       stateDir,
       authDir: path.join(dataDir, 'auth'),
+      webCacheDir: path.join(dataDir, 'web-cache'),
       pendingDir: path.join(stateDir, 'pending'),
       database: path.join(stateDir, 'state.sqlite'),
     },

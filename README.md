@@ -200,6 +200,7 @@ All settings are environment variables (`.env`). Invalid values are reported tog
 | `IMMICH_TIMEOUT_MS` | `120000` | Per-request timeout; raise it for large videos on slow links |
 | `WHATSAPP_GROUP_ID` | (empty) | Group to import; leave empty to list your groups |
 | `WATCH_NEW_MESSAGES` | `true` | Import new messages as they arrive |
+| `WHATSAPP_TIMEOUT_MS` | `600000` | Max time for one WhatsApp Web call; the first sync and long histories are slow |
 | `MAX_MEDIA_MB` | `200` | Skip larger files |
 | `BACKFILL_ENABLED` | `true` | Scan history at startup |
 | `BACKFILL_LIMIT` | `0` | `0` = everything WhatsApp Web has synced; `N` = newest N messages |
@@ -246,6 +247,27 @@ The tests use Node's built-in runner (`node:test`) and run in about a second. Th
 | Chromium "profile in use" | Make sure only one bridge (or dry run) uses `data/`. Locks left by a crashed run are removed automatically. |
 | QR code keeps reappearing | The session expired or was unlinked on the phone; scan again |
 | Old media missing | See limitations below; try `BACKFILL_ONCE=false` once more history has synced |
+| `Execution context was destroyed` / `Runtime.callFunctionOn timed out` at startup | WhatsApp Web reloaded during login or the first sync was slow. The bridge retries 3 times; if it still fails, start it again or raise `WHATSAPP_TIMEOUT_MS` |
+| `minified error "r"` / `r: r` | See [WhatsApp Web incompatibility](#whatsapp-web-incompatibility) |
+
+### WhatsApp Web incompatibility
+
+whatsapp-web.js works by calling WhatsApp Web's internal code, which WhatsApp changes without notice. Since mid-2026 WhatsApp Web builds (2.3000.104x and later), `whatsapp-web.js@1.34.7` fails with a minified error `r` when it loads chat or group details ([issue #201838](https://github.com/wwebjs/whatsapp-web.js/issues/201838)). For the bridge this means:
+
+- **Listing groups** still works: the bridge falls back to a lighter lookup.
+- **History import** (`getChatById` / `fetchMessages`) fails until whatsapp-web.js is fixed.
+
+Until a fixed release is published, apply the community fix from [PR #201850](https://github.com/wwebjs/whatsapp-web.js/pull/201850). It only changes how message ids are read and skips chats that fail to load; it makes no network calls. To apply it:
+
+```bash
+npm install --save patch-package@8
+curl -fL https://github.com/wwebjs/whatsapp-web.js/pull/201850.diff -o /tmp/wwebjs-201850.diff
+(cd node_modules/whatsapp-web.js && patch -p1 < /tmp/wwebjs-201850.diff)
+npx patch-package whatsapp-web.js       # saves patches/whatsapp-web.js+1.34.7.patch
+npm pkg set scripts.postinstall=patch-package
+```
+
+For Docker, also add `COPY patches ./patches` right before `RUN npm ci` in the `Dockerfile`. When whatsapp-web.js publishes a release containing the fix, delete `patches/`, remove the `postinstall` script and update the package.
 
 ## Limitations
 
