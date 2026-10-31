@@ -200,6 +200,7 @@ All settings are environment variables (`.env`). Invalid values are reported tog
 | `IMMICH_TIMEOUT_MS` | `120000` | Per-request timeout; raise it for large videos on slow links |
 | `WHATSAPP_GROUP_ID` | (empty) | Group to import; leave empty to list your groups |
 | `WATCH_NEW_MESSAGES` | `true` | Import new messages as they arrive |
+| `WHATSAPP_TIMEOUT_MS` | `600000` | Max time for one WhatsApp Web call; the first sync and long histories are slow |
 | `MAX_MEDIA_MB` | `200` | Skip larger files |
 | `BACKFILL_ENABLED` | `true` | Scan history at startup |
 | `BACKFILL_LIMIT` | `0` | `0` = everything WhatsApp Web has synced; `N` = newest N messages |
@@ -239,6 +240,7 @@ The tests use Node's built-in runner (`node:test`) and run in about a second. Th
 
 | Symptom | Fix |
 | --- | --- |
+| Photos land in another Immich account | A variable exported in your shell (e.g. `IMMICH_API_KEY` in `~/.zshrc`) overrides `.env`. The bridge warns `Using values from your shell instead of .env`; `npm run ctl doctor` lists them. Unset them, or use Docker, which only reads `.env` |
 | `Data directory /data is not writable` | `sudo chown -R 1000:1000 data` |
 | `Immich rejected IMMICH_API_KEY (401)` | Create a new key; check for copy/paste whitespace |
 | `IMMICH_API_KEY lacks permissions` | Edit the key and add the four permissions above |
@@ -246,6 +248,23 @@ The tests use Node's built-in runner (`node:test`) and run in about a second. Th
 | Chromium "profile in use" | Make sure only one bridge (or dry run) uses `data/`. Locks left by a crashed run are removed automatically. |
 | QR code keeps reappearing | The session expired or was unlinked on the phone; scan again |
 | Old media missing | See limitations below; try `BACKFILL_ONCE=false` once more history has synced |
+| `Execution context was destroyed` / `Runtime.callFunctionOn timed out` at startup | WhatsApp Web reloaded during login or the first sync was slow. The bridge retries 3 times; if it still fails, start it again or raise `WHATSAPP_TIMEOUT_MS` |
+| `minified error "r"` / `r: r` | See [WhatsApp Web incompatibility](#whatsapp-web-incompatibility) |
+
+### WhatsApp Web incompatibility
+
+whatsapp-web.js works by calling WhatsApp Web's internal code, which WhatsApp changes without notice. Since mid-2026 WhatsApp Web builds (2.3000.104x and later), `whatsapp-web.js@1.34.7` has two problems:
+
+- It fails with a minified error `r` when loading chat or group details ([issue #201838](https://github.com/wwebjs/whatsapp-web.js/issues/201838)).
+- Message ids arrive under `$1` instead of `_serialized`.
+
+The bridge works around both in its own adapter (`src/adapters/whatsapp/whatsappSource.js`):
+
+- **Listing groups:** if `getChats()` fails, the bridge reads ids and names straight from WhatsApp Web's chat list.
+- **History:** fetched with the same steps as `getChatById()` + `fetchMessages()`, minus the group-metadata lookup that fails.
+- **Message ids:** `$1` is accepted, and `_serialized` is restored so downloads work, both for history and for live messages.
+
+If WhatsApp Web changes again, a minified error like `r` will point you here. Check the whatsapp-web.js issues for a newer release, then `npm update whatsapp-web.js`. The community fix in [PR #201850](https://github.com/wwebjs/whatsapp-web.js/pull/201850) covers the same problems inside the library, if you prefer patching it (e.g. with `patch-package`).
 
 ## Limitations
 

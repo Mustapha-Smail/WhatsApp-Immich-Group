@@ -100,5 +100,8 @@ function createSource(config, logger) {
   const sourceLogger = logger.child({ component: config.source });
   return config.source === 'fixtures'
     ? new FixtureSource({ dir: config.fixturesDir, logger: sourceLogger })
-    : new WhatsAppSource({ authDir: config.paths.authDir, chromiumPath: config.chromiumPath, logger: sourceLogger });
+    : new WhatsAppSource({
+      authDir: config.paths.authDir, cacheDir: config.paths.webCacheDir, chromiumPath: config.chromiumPath,
+      protocolTimeoutMs: config.whatsappTimeoutMs, logger: sourceLogger,
+    });
 }

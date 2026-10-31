@@ -1,5 +1,5 @@
 import { createApp } from './app.js';
-import { assertRunnable, loadConfig } from './config.js';
+import { assertRunnable, loadConfig, shadowedEnvVars } from './config.js';
 import { createLogger } from './logger.js';
 
 const SHUTDOWN_TIMEOUT_MS = 25_000;
@@ -26,6 +26,8 @@ try {
   const config = loadConfig();
   assertRunnable(config);
   logger = createLogger(config.log);
+  const shadowed = shadowedEnvVars();
+  if (shadowed.length) logger.warn('Using values from your shell instead of .env', { names: shadowed.join(',') });
   app = createApp(config, { logger });
 
   process.once('SIGTERM', () => shutdown(0));
@@ -47,6 +49,6 @@ try {
     await shutdown(failed ? 1 : 0);
   }
 } catch (err) {
-  logger.error('Fatal error', { err });
+  logger.error('Fatal error', { err, stack: err?.cause?.stack ?? err?.stack });
   await shutdown(1);
 }
