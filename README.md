@@ -265,7 +265,17 @@ While the history imports:
 
 - Keep WhatsApp **open in the foreground** on the phone, with the screen on: set Auto-Lock to "Never" temporarily (Settings → Display & Brightness), or open the group and leave it there.
 - Keep the phone **charging and on Wi-Fi**, with Low Power Mode off.
-- Watch the logs. `History sync brought more media` means it's progressing. `Asked the phone for older history` means the bridge is asking for the next batch. `The phone has no older history for this group` means you've reached the start.
+- Watch the logs. `History sync brought more media` means it's progressing. `Asked the phone for older history` means the bridge is asking for the next batch. Its `phoneState` is what WhatsApp reports for the group:
+
+| `phoneState` | Meaning |
+| --- | --- |
+| `more-on-phone` | More history can be requested; the bridge keeps asking, backing off while nothing comes |
+| `initial-sync-in-progress` | WhatsApp is still doing its first sync; the bridge waits without asking |
+| `phone-only` | **WhatsApp's limit for linked devices.** The rest of the history exists only on the phone, and WhatsApp won't send it to a linked device; WhatsApp Web shows "Older messages can be viewed in WhatsApp on your phone" at this point. The bridge stops asking, and the history import is complete |
+| `none-left` | You've reached the start of the group |
+| `more-on-phone-restricted`, `not-reported`, `unknown-…` | Uncommon; the bridge keeps asking, backing off |
+
+These meanings come from other developers' reverse engineering of WhatsApp Web ([whatsapp-web.js#201890](https://github.com/wwebjs/whatsapp-web.js/issues/201890)); WhatsApp doesn't document them.
 
 Restarting the bridge never loses progress: it continues following the sync until the phone confirms there's no older history. To force a full rescan anyway, for example after a version before 2.3 marked the history complete too early (already imported media is skipped):
 
@@ -275,7 +285,7 @@ docker compose exec bridge node src/cli.js rescan     # Docker
 # then restart the bridge
 ```
 
-Media older than what WhatsApp keeps on its servers shows as `unavailable` and can't be downloaded through a linked device. For that, export the chat with media from the phone.
+Two kinds of media can't be imported through a linked device: history beyond the `phone-only` limit, and media older than what WhatsApp keeps on its servers (logged as `unavailable`). For those, export the chat with media from the phone (WhatsApp → group → Export chat → Attach Media).
 
 ### WhatsApp Web incompatibility
 

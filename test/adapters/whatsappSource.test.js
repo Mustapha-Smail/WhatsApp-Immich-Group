@@ -5,7 +5,7 @@ import { EventEmitter } from 'node:events';
 import { describe, it } from 'node:test';
 import {
   WhatsAppSource, clearStaleChromiumLocks, describeTransferType, explainWhatsAppError, interpretDownload, isTransientError,
-  normalizeMessageId,
+  normalizeMessageId, requestHistoryInPage,
   toIncomingMessage,
 } from '../../src/adapters/whatsapp/whatsappSource.js';
 import { silentLogger, tempDir } from '../helpers.js';
@@ -232,6 +232,14 @@ describe('WhatsAppSource.fetchHistory', () => {
     assert.deepEqual(args, ['requestHistoryInPage', '1203@g.us']);
   });
 
+  it('explains why history ends when the rest is only on the phone', async () => {
+    const { source } = fakeWhatsApp(['ok'], { evaluate: async () => ({ requested: false, endOfHistory: true, transferType: 4 }) });
+    await source.connect();
+    const result = await source.requestOlderHistory('1203@g.us');
+    assert.equal(result.state, 'phone-only');
+    assert.match(result.detail, /export the chat/);
+  });
+
   it('rejects ids that are not groups and chats that do not exist', async () => {
     const { source } = fakeWhatsApp(['ok'], { evaluate: async () => null });
     await source.connect();
@@ -262,13 +270,52 @@ describe('interpretDownload', () => {
 });
 
 describe('describeTransferType', () => {
-  it('names the history states WhatsApp reports', () => {
-    assert.equal(describeTransferType(0), 'more-on-phone');
-    assert.equal(describeTransferType(1), 'none-left');
-    assert.equal(describeTransferType(2), 'more-on-phone-after-on-demand-sync');
-    assert.equal(describeTransferType(null), 'not-reported');
-    assert.equal(describeTransferType(7), 'unknown-7');
+  it('names the history states WhatsApp Web reports', () => {
+    assert.equal(describeTransferType(0).state, 'more-on-phone');
+    assert.equal(describeTransferType(1).state, 'none-left');
+    assert.equal(describeTransferType(2).state, 'initial-sync-in-progress');
+    assert.equal(describeTransferType(4).state, 'phone-only');
+    assert.match(describeTransferType(4).detail, /only on the phone/);
+    assert.equal(describeTransferType(null).state, 'not-reported');
+    assert.equal(describeTransferType(7).state, 'unknown-7');
   });
+});
+
+describe('requestHistoryInPage (against a fake WhatsApp Web)', () => {
+  async function withChat(transferType, fn) {
+    const sent = [];
+    globalThis.window = {
+      require: name => ({
+        WAWebCollections: { Chat: { get: () => ({ id: 'wid', endOfHistoryTransferType: transferType }) } },
+        WAWebWidFactory: { createWid: id => id },
+        WAWebSendNonMessageDataRequest: { sendPeerDataOperationRequest: async (op, args) => { sent.push([op, args]); } },
+      })[name],
+    };
+    try {
+      return await fn(sent);
+    } finally {
+      delete globalThis.window;
+    }
+  }
+
+  it('asks the phone when more history can be requested', () => withChat(0, async sent => {
+    assert.deepEqual(await requestHistoryInPage('1203@g.us'), { requested: true, endOfHistory: false, transferType: 0 });
+    assert.deepEqual(sent, [[3, { chatId: 'wid' }]]);
+  }));
+
+  it('treats "only on the phone" (4) and "nothing older" (1) as the end, without asking', async () => {
+    for (const type of [1, 4]) {
+      await withChat(type, async sent => {
+        assert.equal((await requestHistoryInPage('1203@g.us')).endOfHistory, true);
+        assert.deepEqual(sent, []);
+      });
+    }
+  });
+
+  it('waits without asking while the initial sync is in progress (2)', () => withChat(2, async sent => {
+    assert.deepEqual(await requestHistoryInPage('1203@g.us'), { requested: false, endOfHistory: false, transferType: 2 });
+    assert.deepEqual(sent, []);
+  }));
 });
 
 describe('WhatsApp error helpers', () => {
