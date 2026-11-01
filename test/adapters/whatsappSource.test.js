@@ -167,7 +167,7 @@ describe('WhatsAppSource.fetchHistory', () => {
     });
     await source.connect();
     const messages = await source.fetchHistory('1203@g.us', 500);
-    assert.deepEqual(args, ['1203@g.us', 500]);
+    assert.deepEqual(args, ['1203@g.us', 500, false]);
     assert.deepEqual(messages.map(m => m.id), ['a']);
   });
 
@@ -185,6 +185,14 @@ describe('WhatsAppSource.fetchHistory', () => {
     const [message] = await source.fetchHistory('1203@g.us');
     assert.deepEqual(await message.download(), { mimetype: 'image/jpeg', data: Buffer.from('jpeg') });
     assert.deepEqual(calls[1], ['downloadInPage', 'false_1203@g.us_AC6B_1331@lid', '1203@g.us']);
+  });
+
+  it('counts available media without serializing messages', async () => {
+    let args;
+    const { source } = fakeWhatsApp(['ok'], { evaluate: async (fn, ...rest) => { args = [fn.name, ...rest]; return 42; } });
+    await source.connect();
+    assert.equal(await source.historySize('1203@g.us'), 42);
+    assert.deepEqual(args, ['historyInPage', '1203@g.us', 0, true]);
   });
 
   it('rejects ids that are not groups and chats that do not exist', async () => {

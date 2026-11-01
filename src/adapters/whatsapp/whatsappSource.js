@@ -87,6 +87,31 @@ async function downloadInPage(msgId, chatId) {
   }
 }
 
+/** Runs inside WhatsApp Web: loads the group's history, returning photo/video models or just their count. */
+async function historyInPage(chatId, limit, countOnly) {
+  const chat = await window.WWebJS.getChat(chatId, { getAsModel: false });
+  if (!chat) return null;
+  const keep = m => !m.isNotification;
+  let msgs = chat.msgs.getModelsArray().filter(keep);
+  // limit 0 = keep loading until WhatsApp Web has nothing older.
+  while (!limit || msgs.length < limit) {
+    const older = await window.require('WAWebChatLoadMessages').loadEarlierMsgs({ chat });
+    if (!older || !older.length) break;
+    msgs = [...older.filter(keep), ...msgs];
+  }
+  if (limit && msgs.length > limit) msgs = msgs.sort((a, b) => a.t - b.t).slice(-limit);
+  // Serialize only photos and videos; a group can hold many thousands of text messages.
+  const media = msgs.filter(m => m.type === 'image' || m.type === 'video');
+  if (countOnly) return media.length;
+  return media.map(m => {
+    const model = window.WWebJS.getMessageModel(m);
+    if (model.id && model.id._serialized == null) {
+      model.id = { ...model.id, _serialized: m.id._serialized ?? m.id.$1 ?? String(m.id) };
+    }
+    return model;
+  });
+}
+
 /** Turns downloadInPage's result into the core's shape. */
 export function interpretDownload(result) {
   if (result?.status === 'ok') return { mimetype: result.mimetype, data: Buffer.from(result.data, 'base64') };
@@ -272,35 +297,25 @@ export class WhatsAppSource {
    * lookup that breaks on recent WhatsApp Web builds (minified error "r", whatsapp-web.js#201838).
    */
   async fetchHistory(groupId, limit = 0) {
+    const models = await this.#history(groupId, limit, false);
+    return models.map(model => toIncomingMessage(new this.#Message(this.#client, model), this.#download)).filter(Boolean);
+  }
+
+  /** Number of photos and videos currently available in the group; grows while history syncs. */
+  async historySize(groupId) {
+    return this.#history(groupId, 0, true);
+  }
+
+  async #history(groupId, limit, countOnly) {
     if (!groupId.endsWith('@g.us')) throw new Error(`WHATSAPP_GROUP_ID ${groupId} is not a group id (expected ...@g.us)`);
-    let models;
+    let result;
     try {
-      models = await this.#client.pupPage.evaluate(async (chatId, limit) => {
-        const chat = await window.WWebJS.getChat(chatId, { getAsModel: false });
-        if (!chat) return null;
-        const keep = m => !m.isNotification;
-        let msgs = chat.msgs.getModelsArray().filter(keep);
-        // limit 0 = keep loading until WhatsApp Web has nothing older.
-        while (!limit || msgs.length < limit) {
-          const older = await window.require('WAWebChatLoadMessages').loadEarlierMsgs({ chat });
-          if (!older || !older.length) break;
-          msgs = [...older.filter(keep), ...msgs];
-        }
-        if (limit && msgs.length > limit) msgs = msgs.sort((a, b) => a.t - b.t).slice(-limit);
-        // Serialize only photos and videos; a group can hold many thousands of text messages.
-        return msgs.filter(m => m.type === 'image' || m.type === 'video').map(m => {
-          const model = window.WWebJS.getMessageModel(m);
-          if (model.id && model.id._serialized == null) {
-            model.id = { ...model.id, _serialized: m.id._serialized ?? m.id.$1 ?? String(m.id) };
-          }
-          return model;
-        });
-      }, groupId, limit);
+      result = await this.#client.pupPage.evaluate(historyInPage, groupId, limit, countOnly);
     } catch (err) {
       throw explainWhatsAppError(err, 'the history request');
     }
-    if (!models) throw new Error(`WhatsApp chat ${groupId} not found; check WHATSAPP_GROUP_ID`);
-    return models.map(model => toIncomingMessage(new this.#Message(this.#client, model), this.#download)).filter(Boolean);
+    if (result == null) throw new Error(`WhatsApp chat ${groupId} not found; check WHATSAPP_GROUP_ID`);
+    return result;
   }
 
   async disconnect() {

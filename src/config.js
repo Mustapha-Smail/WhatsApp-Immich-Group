@@ -90,6 +90,8 @@ export function loadConfig(env = process.env) {
       limit: int('BACKFILL_LIMIT', 0),
       once: bool('BACKFILL_ONCE', true),
       delayMs: int('BACKFILL_DELAY_MS', 250),
+      settleMs: int('BACKFILL_SETTLE_MS', 180_000),
+      maxWaitMs: int('BACKFILL_MAX_WAIT_MS', 3_600_000),
     },
     uploads: {
       intervalMs: int('UPLOAD_INTERVAL_MS', 60_000, 1000),
