@@ -129,6 +129,13 @@ async function requestHistoryInPage(chatId) {
   return { requested: true, endOfHistory: false, transferType };
 }
 
+// WhatsApp's EndOfHistoryTransferType (Conversation proto), as reported for the chat.
+const TRANSFER_STATES = { 0: 'more-on-phone', 1: 'none-left', 2: 'more-on-phone-after-on-demand-sync' };
+
+export function describeTransferType(transferType) {
+  return TRANSFER_STATES[transferType] ?? (transferType == null ? 'not-reported' : `unknown-${transferType}`);
+}
+
 /** Turns downloadInPage's result into the core's shape. */
 export function interpretDownload(result) {
   if (result?.status === 'ok') return { mimetype: result.mimetype, data: Buffer.from(result.data, 'base64') };
@@ -359,8 +366,7 @@ export class WhatsAppSource {
       throw explainWhatsAppError(err, 'the history sync request');
     }
     if (result == null) throw new Error(`WhatsApp chat ${groupId} not found; check WHATSAPP_GROUP_ID`);
-    this.logger.debug('History sync request', result);
-    return result;
+    return { ...result, state: describeTransferType(result.transferType) };
   }
 
   async #history(groupId, limit, countOnly) {
