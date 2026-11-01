@@ -5,13 +5,15 @@ const defaultSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
  *
  * It scans right away, so uploads start immediately. WhatsApp then keeps syncing older messages to a
  * newly linked device, sometimes for hours or days and with long pauses, so it follows the sync:
- * whenever the amount of available media grows it scans again (already queued messages are
- * skipped), and whenever nothing has arrived for requestIntervalMs it asks the phone for older
- * history. It stops once the phone reports there is no older history and nothing new has arrived
- * for settleMs (or after maxWaitMs, when set). Uploads run in parallel the whole time.
+ * whenever the amount of available media grows it scans again (already imported messages are
+ * skipped), and whenever nothing has arrived for a while it asks the phone for older history.
+ * Requests that bring nothing back off from requestIntervalMs to requestMaxIntervalMs, and the
+ * interval resets as soon as media arrives. Uploads run in parallel the whole time.
  *
- * The backfill is only marked complete once the sync settled without download failures, so
- * anything missed gets picked up on the next start.
+ * Progress (back-off, last request, last arrival) is saved, so a restart continues where the
+ * previous run left off. The backfill is only marked complete once the phone itself reports that it
+ * has no older history (or, for sources that cannot be asked, once the count settled), and no
+ * download failed. Anything else is picked up again on the next start.
  */
 export class Backfill {
   #stopped = false;
@@ -23,10 +25,10 @@ export class Backfill {
    * @param {import('./ports.js').JobRepository} deps.jobs
    */
   constructor({ source, importer, jobs, logger, groupId, enabled = true, limit = 0, once = true, delayMs = 0,
-    settleMs = 180_000, maxWaitMs = 0, syncPollMs = 15_000, requestIntervalMs = 60_000, sleep = defaultSleep,
-    now = Date.now, pausePollMs = 5000 }) {
+    settleMs = 180_000, maxWaitMs = 0, syncPollMs = 15_000, requestIntervalMs = 60_000, requestMaxIntervalMs = 1_800_000,
+    sleep = defaultSleep, now = Date.now, pausePollMs = 5000 }) {
     Object.assign(this, { source, importer, jobs, logger, groupId, enabled, limit, once, delayMs, settleMs, maxWaitMs,
-      syncPollMs, requestIntervalMs, sleep, now, pausePollMs });
+      syncPollMs, requestIntervalMs, requestMaxIntervalMs, sleep, now, pausePollMs });
   }
 
   // Same key format as v1 of the bridge, so completed scans carry over.
@@ -34,10 +36,15 @@ export class Backfill {
     return `backfill:v2:${this.groupId}:${this.limit}`;
   }
 
+  // Under the backfill: prefix, so `cli rescan` clears it too.
+  get progressKey() {
+    return `backfill:sync:${this.groupId}`;
+  }
+
   async run() {
     if (!this.enabled) return { status: 'disabled' };
     if (this.once && this.jobs.getSetting(this.marker) === 'complete') {
-      this.logger.info('Backfill already completed; set BACKFILL_ONCE=false to rescan');
+      this.logger.info('History import already complete; run `cli rescan` to scan again');
       return { status: 'already-complete' };
     }
 
@@ -48,18 +55,21 @@ export class Backfill {
     let passes = 1;
     await this.#scan(outcomes);
 
-    let settled = true;
+    let result = { settled: true };
     if (following && initialSize != null && !this.#stopped) {
-      const result = await this.#followSync(initialSize, outcomes);
+      result = await this.#followSync(initialSize, outcomes, { freshMedia: outcomes.queued > 0 });
       passes += result.passes;
-      settled = result.settled;
     }
     if (this.#stopped) return { status: 'stopped', passes, outcomes };
 
-    const complete = settled && !outcomes.failed;
-    if (complete) this.jobs.setSetting(this.marker, 'complete');
-    this.logger.info(complete ? 'Backfill complete' : 'Backfill incomplete; it continues on next start',
-      { passes, ...outcomes, ...(!settled && { reason: 'history still syncing' }) });
+    const complete = result.settled && !outcomes.failed;
+    if (complete) {
+      this.jobs.setSetting(this.marker, 'complete');
+      this.jobs.setSetting(this.progressKey, '');
+    }
+    const reason = !result.settled ? result.reason : outcomes.failed ? 'some downloads failed' : undefined;
+    this.logger.info(complete ? 'History import complete' : 'History import paused; it continues on next start',
+      { passes, ...outcomes, reason });
     return { status: complete ? 'complete' : 'incomplete', passes, outcomes };
   }
 
@@ -87,59 +97,111 @@ export class Backfill {
    * Rescans whenever the media count grows and asks the phone for older history while it is quiet.
    * Ends once the phone has no older history and the count has been stable for settleMs.
    */
-  async #followSync(initialSize, outcomes) {
+  async #followSync(initialSize, outcomes, { freshMedia }) {
+    const canAsk = Boolean(this.source.requestOlderHistory);
+    const saved = canAsk ? this.#loadProgress() : null;
     const started = this.now();
     let last = initialSize;
     let stableSince = started;
+    // Request schedule, carried over from the previous run unless media just arrived.
+    let interval = this.requestIntervalMs;
+    let unanswered = 0;
     let lastRequest = -Infinity;
-    // Sources that cannot ask for more history just wait for the count to settle.
-    let endOfHistory = !this.source.requestOlderHistory;
+    let quietSince = started;
+    if (saved && !freshMedia) {
+      ({ interval, unanswered, lastRequest, quietSince } = saved);
+      this.logger.info('Resuming history sync where the last run left off', {
+        unanswered, nextRequestInMinutes: minutes(Math.max(0, Math.max(quietSince, lastRequest) + interval - started)),
+      });
+    }
+    const save = () => this.#saveProgress({ interval, unanswered, lastRequest, quietSince });
+    // Sources that cannot be asked just wait for the count to settle.
+    let stopAsking = !canAsk;
+    let confirmedByPhone = false;
     let passes = 0;
     this.logger.info('Following WhatsApp history sync; new media is imported as it arrives',
       { media: last, maxWaitMinutes: this.maxWaitMs ? this.maxWaitMs / 60_000 : 'unlimited' });
+
     while (!this.#stopped) {
       const size = await this.#historySize();
-      if (size == null) return { passes, settled: true };
+      if (size == null) return { passes, settled: !canAsk, reason: 'could not check sync progress' };
       if (size !== last) {
         this.logger.info('History sync brought more media', { media: size, added: size - last });
         last = size;
-        stableSince = this.now();
+        stableSince = quietSince = this.now();
+        interval = this.requestIntervalMs;
+        unanswered = 0;
+        if (canAsk) save();
         passes++;
         await this.#scan(outcomes);
       }
       const now = this.now();
-      if (endOfHistory && now - stableSince >= this.settleMs) {
-        this.logger.info('History sync finished', { media: size });
-        return { passes, settled: true };
+      if (stopAsking && now - stableSince >= this.settleMs) {
+        if (!canAsk || confirmedByPhone) {
+          this.logger.info('History sync finished', { media: size });
+          return { passes, settled: true };
+        }
+        return { passes, settled: false, reason: 'the phone did not confirm the end of history' };
       }
       if (this.maxWaitMs && now - started >= this.maxWaitMs) {
-        this.logger.warn('History still syncing after BACKFILL_MAX_WAIT_MS; continuing on next start', { media: size });
-        return { passes, settled: false };
+        this.logger.warn('History still syncing after BACKFILL_MAX_WAIT_MS', { media: size });
+        return { passes, settled: false, reason: 'BACKFILL_MAX_WAIT_MS reached' };
       }
-      if (!endOfHistory && now - Math.max(stableSince, lastRequest) >= this.requestIntervalMs) {
+      if (!stopAsking && now - Math.max(quietSince, lastRequest) >= interval) {
         lastRequest = now;
-        endOfHistory = await this.#requestOlderHistory();
-        if (endOfHistory) stableSince = now;
+        unanswered++;
+        const nextInterval = Math.min(interval * 2, this.requestMaxIntervalMs);
+        const answer = await this.#requestOlderHistory({
+          attempt: unanswered, quietMinutes: minutes(now - quietSince), nextInMinutes: minutes(nextInterval),
+        });
+        interval = nextInterval;
+        save();
+        if (answer !== 'more') {
+          stopAsking = true;
+          confirmedByPhone = answer === 'end';
+          stableSince = now;
+        }
       }
       await this.sleep(this.syncPollMs);
     }
-    return { passes, settled: false };
+    return { passes, settled: false, reason: 'stopped' };
   }
 
-  /** Asks the phone for older messages. Returns true when there is nothing more to ask for. */
-  async #requestOlderHistory() {
+  /** @returns {Promise<'more'|'end'|'error'>} */
+  async #requestOlderHistory(progress) {
     try {
       const result = await this.source.requestOlderHistory(this.groupId);
       if (result?.endOfHistory) {
-        this.logger.info('The phone has no older history for this group');
-        return true;
+        this.logger.info('The phone has no older history for this group', { phoneState: result.state });
+        return 'end';
       }
-      this.logger.info('Asked the phone for older history');
-      return false;
+      this.logger.info('Asked the phone for older history', { phoneState: result?.state, ...progress });
+      return 'more';
     } catch (err) {
-      this.logger.warn('Could not ask the phone for older history; waiting for the sync instead', { err });
-      return true;
+      this.logger.warn('Could not ask the phone for older history; trying again on next start', { err });
+      return 'error';
     }
+  }
+
+  #loadProgress() {
+    try {
+      const saved = JSON.parse(this.jobs.getSetting(this.progressKey) || 'null');
+      if (!saved) return null;
+      return {
+        interval: saved.interval ?? this.requestIntervalMs,
+        unanswered: saved.unanswered ?? 0,
+        lastRequest: saved.lastRequest ?? -Infinity,
+        quietSince: saved.quietSince ?? this.now(),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  #saveProgress(progress) {
+    // -Infinity is not valid JSON; null means "never asked".
+    const lastRequest = Number.isFinite(progress.lastRequest) ? progress.lastRequest : null;
+    this.jobs.setSetting(this.progressKey, JSON.stringify({ ...progress, lastRequest }));
   }
 
   /** Never throws: a failed check just ends sync following. */
@@ -159,3 +221,5 @@ export class Backfill {
     if (!this.#stopped) this.logger.info('Backfill resumed');
   }
 }
+
+const minutes = ms => Math.round(ms / 6000) / 10;

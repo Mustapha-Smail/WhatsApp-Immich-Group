@@ -26,7 +26,7 @@ Copies every photo and video from one WhatsApp group into an Immich album. It im
 ```
 
 1. **Source.** A headless Chromium logs into WhatsApp Web as a linked device. The session is saved in `data/auth`, so you scan the QR code only once.
-2. **History, right away.** As soon as WhatsApp is connected, the bridge scans the group's available history and starts uploading. Your phone then keeps sending older messages to the linked device, sometimes for hours or days, with pauses. The bridge follows that sync: it checks the amount of media every 15 s and scans again whenever it grows, importing only what's new. When nothing has arrived for a minute, it **asks the phone for older history**, the same request WhatsApp Web makes when you scroll to the top of a chat. It stops once the phone reports there's no older history and nothing new has arrived for `BACKFILL_SETTLE_MS` (3 min). Uploads run in parallel the whole time. See [Getting the full history](#getting-the-full-history).
+2. **History, right away.** As soon as WhatsApp is connected, the bridge scans the group's available history and starts uploading. Your phone then keeps sending older messages to the linked device, sometimes for hours or days, with pauses. The bridge follows that sync: it checks the amount of media every 15 s and scans again whenever it grows, importing only what's new. When nothing has arrived for a minute, it **asks the phone for older history**, the same request WhatsApp Web makes when you scroll to the top of a chat. Unanswered requests back off (1, 2, 4 … up to 30 min). It stops once the phone reports there's no older history and nothing new has arrived for `BACKFILL_SETTLE_MS` (3 min). Uploads run in parallel the whole time. **Restarts continue where the last run left off:** already imported media is skipped, and the request schedule is restored. Until the phone confirms the end of history, every start keeps following the sync, with no `.env` changes needed. See [Getting the full history](#getting-the-full-history).
 3. **Import.** Each image or video from the configured group is downloaded, written to `data/pending/`, and recorded in `data/state.sqlite`. The record is keyed by the WhatsApp message id, so no message is processed twice.
 4. **Upload.** The worker uploads each file to Immich with its original WhatsApp date, adds it to the album, and deletes the local copy. These two steps are saved separately, so a crash in between never uploads a file twice.
 5. **Failures.** A failed job is retried with exponential backoff (30 s up to 1 h). After `MAX_ATTEMPTS` it is marked `failed`, and newer jobs keep flowing. `retry-failed` re-queues failed jobs.
@@ -207,7 +207,7 @@ All settings are environment variables (`.env`). Invalid values are reported tog
 | `MAX_MEDIA_MB` | `200` | Skip larger files |
 | `BACKFILL_ENABLED` | `true` | Scan history at startup |
 | `BACKFILL_LIMIT` | `0` | `0` = everything WhatsApp Web has synced; `N` = newest N messages |
-| `BACKFILL_ONCE` | `true` | Skip the scan once it has completed without errors; `false` = rescan each start |
+| `BACKFILL_ONCE` | `true` | Skip the history scan on start once it's complete, meaning the phone reported no older history and no download failed; `false` = rescan each start |
 | `BACKFILL_DELAY_MS` | `250` | Pause between media downloads during the scan |
 | `BACKFILL_SETTLE_MS` | `180000` | Once the phone has no older history, stop following the sync after nothing new has arrived for this long; `0` = scan once only |
 | `BACKFILL_MAX_WAIT_MS` | `0` | Stop following the history sync after this long, and continue on the next start; `0` = no limit |
@@ -267,7 +267,7 @@ While the history imports:
 - Keep the phone **charging and on Wi-Fi**, with Low Power Mode off.
 - Watch the logs. `History sync brought more media` means it's progressing. `Asked the phone for older history` means the bridge is asking for the next batch. `The phone has no older history for this group` means you've reached the start.
 
-If an earlier run marked the history as complete too early, scan again (already imported media is skipped):
+Restarting the bridge never loses progress: it continues following the sync until the phone confirms there's no older history. To force a full rescan anyway, for example after a version before 2.3 marked the history complete too early (already imported media is skipped):
 
 ```bash
 npm run ctl rescan                                    # local

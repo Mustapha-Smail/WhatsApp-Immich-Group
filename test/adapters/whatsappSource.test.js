@@ -4,7 +4,8 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { describe, it } from 'node:test';
 import {
-  WhatsAppSource, clearStaleChromiumLocks, explainWhatsAppError, interpretDownload, isTransientError, normalizeMessageId,
+  WhatsAppSource, clearStaleChromiumLocks, describeTransferType, explainWhatsAppError, interpretDownload, isTransientError,
+  normalizeMessageId,
   toIncomingMessage,
 } from '../../src/adapters/whatsapp/whatsappSource.js';
 import { silentLogger, tempDir } from '../helpers.js';
@@ -226,7 +227,8 @@ describe('WhatsAppSource.fetchHistory', () => {
       evaluate: async (fn, ...rest) => { args = [fn.name, ...rest]; return { requested: true, endOfHistory: false, transferType: 0 }; },
     });
     await source.connect();
-    assert.deepEqual(await source.requestOlderHistory('1203@g.us'), { requested: true, endOfHistory: false, transferType: 0 });
+    assert.deepEqual(await source.requestOlderHistory('1203@g.us'),
+      { requested: true, endOfHistory: false, transferType: 0, state: 'more-on-phone' });
     assert.deepEqual(args, ['requestHistoryInPage', '1203@g.us']);
   });
 
@@ -256,6 +258,16 @@ describe('interpretDownload', () => {
       status: 'error', step: 'decrypt', error: { name: 'DataError', message: 'No key', status: 403 },
       resolveError: { name: 't', message: 't' },
     }), /step "decrypt": DataError: No key: status 403 \(resolve step also failed: t: t\)/);
+  });
+});
+
+describe('describeTransferType', () => {
+  it('names the history states WhatsApp reports', () => {
+    assert.equal(describeTransferType(0), 'more-on-phone');
+    assert.equal(describeTransferType(1), 'none-left');
+    assert.equal(describeTransferType(2), 'more-on-phone-after-on-demand-sync');
+    assert.equal(describeTransferType(null), 'not-reported');
+    assert.equal(describeTransferType(7), 'unknown-7');
   });
 });
 
