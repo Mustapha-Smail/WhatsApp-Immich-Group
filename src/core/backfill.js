@@ -3,10 +3,12 @@ const defaultSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 /**
  * Imports the group's history and feeds media messages to the importer.
  *
- * It scans right away, so uploads start immediately. Right after a device is linked, WhatsApp keeps
- * syncing older messages for a while, so it then follows the sync: whenever the amount of available
- * media grows it scans again (already queued messages are skipped), until the amount has not grown
- * for settleMs. Uploads run in parallel the whole time.
+ * It scans right away, so uploads start immediately. WhatsApp then keeps syncing older messages to a
+ * newly linked device, sometimes for hours or days and with long pauses, so it follows the sync:
+ * whenever the amount of available media grows it scans again (already queued messages are
+ * skipped), and whenever nothing has arrived for requestIntervalMs it asks the phone for older
+ * history. It stops once the phone reports there is no older history and nothing new has arrived
+ * for settleMs (or after maxWaitMs, when set). Uploads run in parallel the whole time.
  *
  * The backfill is only marked complete once the sync settled without download failures, so
  * anything missed gets picked up on the next start.
@@ -21,9 +23,10 @@ export class Backfill {
    * @param {import('./ports.js').JobRepository} deps.jobs
    */
   constructor({ source, importer, jobs, logger, groupId, enabled = true, limit = 0, once = true, delayMs = 0,
-    settleMs = 180_000, maxWaitMs = 3_600_000, syncPollMs = 15_000, sleep = defaultSleep, now = Date.now, pausePollMs = 5000 }) {
+    settleMs = 180_000, maxWaitMs = 0, syncPollMs = 15_000, requestIntervalMs = 60_000, sleep = defaultSleep,
+    now = Date.now, pausePollMs = 5000 }) {
     Object.assign(this, { source, importer, jobs, logger, groupId, enabled, limit, once, delayMs, settleMs, maxWaitMs,
-      syncPollMs, sleep, now, pausePollMs });
+      syncPollMs, requestIntervalMs, sleep, now, pausePollMs });
   }
 
   // Same key format as v1 of the bridge, so completed scans carry over.
@@ -80,14 +83,20 @@ export class Backfill {
     }
   }
 
-  /** Rescans whenever the media count grows; ends once it has been stable for settleMs, or after maxWaitMs. */
+  /**
+   * Rescans whenever the media count grows and asks the phone for older history while it is quiet.
+   * Ends once the phone has no older history and the count has been stable for settleMs.
+   */
   async #followSync(initialSize, outcomes) {
     const started = this.now();
     let last = initialSize;
     let stableSince = started;
+    let lastRequest = -Infinity;
+    // Sources that cannot ask for more history just wait for the count to settle.
+    let endOfHistory = !this.source.requestOlderHistory;
     let passes = 0;
     this.logger.info('Following WhatsApp history sync; new media is imported as it arrives',
-      { media: last, settleSeconds: this.settleMs / 1000, maxWaitMinutes: this.maxWaitMs / 60_000 });
+      { media: last, maxWaitMinutes: this.maxWaitMs ? this.maxWaitMs / 60_000 : 'unlimited' });
     while (!this.#stopped) {
       const size = await this.#historySize();
       if (size == null) return { passes, settled: true };
@@ -99,17 +108,38 @@ export class Backfill {
         await this.#scan(outcomes);
       }
       const now = this.now();
-      if (now - stableSince >= this.settleMs) {
-        this.logger.info('History sync settled', { media: size });
+      if (endOfHistory && now - stableSince >= this.settleMs) {
+        this.logger.info('History sync finished', { media: size });
         return { passes, settled: true };
       }
-      if (now - started >= this.maxWaitMs) {
-        this.logger.warn('History still syncing after the maximum time; continuing on next start', { media: size });
+      if (this.maxWaitMs && now - started >= this.maxWaitMs) {
+        this.logger.warn('History still syncing after BACKFILL_MAX_WAIT_MS; continuing on next start', { media: size });
         return { passes, settled: false };
+      }
+      if (!endOfHistory && now - Math.max(stableSince, lastRequest) >= this.requestIntervalMs) {
+        lastRequest = now;
+        endOfHistory = await this.#requestOlderHistory();
+        if (endOfHistory) stableSince = now;
       }
       await this.sleep(this.syncPollMs);
     }
     return { passes, settled: false };
+  }
+
+  /** Asks the phone for older messages. Returns true when there is nothing more to ask for. */
+  async #requestOlderHistory() {
+    try {
+      const result = await this.source.requestOlderHistory(this.groupId);
+      if (result?.endOfHistory) {
+        this.logger.info('The phone has no older history for this group');
+        return true;
+      }
+      this.logger.info('Asked the phone for older history');
+      return false;
+    } catch (err) {
+      this.logger.warn('Could not ask the phone for older history; waiting for the sync instead', { err });
+      return true;
+    }
   }
 
   /** Never throws: a failed check just ends sync following. */

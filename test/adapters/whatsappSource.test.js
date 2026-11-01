@@ -195,6 +195,16 @@ describe('WhatsAppSource.fetchHistory', () => {
     assert.deepEqual(args, ['historyInPage', '1203@g.us', 0, true]);
   });
 
+  it('asks the phone for older history', async () => {
+    let args;
+    const { source } = fakeWhatsApp(['ok'], {
+      evaluate: async (fn, ...rest) => { args = [fn.name, ...rest]; return { requested: true, endOfHistory: false, transferType: 0 }; },
+    });
+    await source.connect();
+    assert.deepEqual(await source.requestOlderHistory('1203@g.us'), { requested: true, endOfHistory: false, transferType: 0 });
+    assert.deepEqual(args, ['requestHistoryInPage', '1203@g.us']);
+  });
+
   it('rejects ids that are not groups and chats that do not exist', async () => {
     const { source } = fakeWhatsApp(['ok'], { evaluate: async () => null });
     await source.connect();

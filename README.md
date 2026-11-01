@@ -26,7 +26,7 @@ Copies every photo and video from one WhatsApp group into an Immich album. It im
 ```
 
 1. **Source.** A headless Chromium logs into WhatsApp Web as a linked device. The session is saved in `data/auth`, so you scan the QR code only once.
-2. **History, right away.** As soon as WhatsApp is connected, the bridge scans the group's available history and starts uploading. Right after you scan the QR code, your phone keeps sending older messages to the new linked device for a while. The bridge follows that sync: it checks the amount of media every 15 s and scans again whenever it grows, importing only what's new. Uploads run in parallel the whole time. It stops following once nothing new has arrived for `BACKFILL_SETTLE_MS` (3 min), or after `BACKFILL_MAX_WAIT_MS` (1 h).
+2. **History, right away.** As soon as WhatsApp is connected, the bridge scans the group's available history and starts uploading. Your phone then keeps sending older messages to the linked device, sometimes for hours or days, with pauses. The bridge follows that sync: it checks the amount of media every 15 s and scans again whenever it grows, importing only what's new. When nothing has arrived for a minute, it **asks the phone for older history**, the same request WhatsApp Web makes when you scroll to the top of a chat. It stops once the phone reports there's no older history and nothing new has arrived for `BACKFILL_SETTLE_MS` (3 min). Uploads run in parallel the whole time. See [Getting the full history](#getting-the-full-history).
 3. **Import.** Each image or video from the configured group is downloaded, written to `data/pending/`, and recorded in `data/state.sqlite`. The record is keyed by the WhatsApp message id, so no message is processed twice.
 4. **Upload.** The worker uploads each file to Immich with its original WhatsApp date, adds it to the album, and deletes the local copy. These two steps are saved separately, so a crash in between never uploads a file twice.
 5. **Failures.** A failed job is retried with exponential backoff (30 s up to 1 h). After `MAX_ATTEMPTS` it is marked `failed`, and newer jobs keep flowing. `retry-failed` re-queues failed jobs.
@@ -178,6 +178,7 @@ npm run ctl <command>                                    # local
 | `pause` | Pauses uploads and the history scan |
 | `resume` | Resumes them |
 | `retry-failed` | Re-queues jobs that failed permanently, e.g. after fixing the API key |
+| `rescan` | Scans the group's history again on the next start; already imported media is skipped |
 | `doctor` | Read-only check of configuration, WhatsApp session and Immich access |
 
 Add `DRY_RUN=true` (e.g. `docker compose exec -e DRY_RUN=true ...`) to act on the dry-run state instead.
@@ -207,8 +208,8 @@ All settings are environment variables (`.env`). Invalid values are reported tog
 | `BACKFILL_LIMIT` | `0` | `0` = everything WhatsApp Web has synced; `N` = newest N messages |
 | `BACKFILL_ONCE` | `true` | Skip the scan once it has completed without errors; `false` = rescan each start |
 | `BACKFILL_DELAY_MS` | `250` | Pause between media downloads during the scan |
-| `BACKFILL_SETTLE_MS` | `180000` | Keep importing newly synced history until nothing new has arrived for this long; `0` = scan once only |
-| `BACKFILL_MAX_WAIT_MS` | `3600000` | Stop following the history sync after this long; it continues on the next start |
+| `BACKFILL_SETTLE_MS` | `180000` | Once the phone has no older history, stop following the sync after nothing new has arrived for this long; `0` = scan once only |
+| `BACKFILL_MAX_WAIT_MS` | `0` | Stop following the history sync after this long, and continue on the next start; `0` = no limit |
 | `UPLOAD_INTERVAL_MS` | `60000` | How often retries run and how quickly a resume is picked up |
 | `MAX_ATTEMPTS` | `8` | Attempts before a job is marked `failed` |
 | `DRY_RUN` | `false` | Never write to Immich; separate, throwaway state |
@@ -250,9 +251,29 @@ The tests use Node's built-in runner (`node:test`) and run in about a second. Th
 | Jobs stuck in `failed` | `cli status` shows the error; fix the cause, then `cli retry-failed` |
 | Chromium "profile in use" | Make sure only one bridge (or dry run) uses `data/`. Locks left by a crashed run are removed automatically. |
 | QR code keeps reappearing | The session expired or was unlinked on the phone; scan again |
-| Only recent media imported | The phone stopped syncing history (offline, or WhatsApp in the background). Keep it online with WhatsApp open, raise `BACKFILL_SETTLE_MS` if syncs pause for long, then rescan once with `BACKFILL_ONCE=false` (already imported items are skipped) |
+| Only recent media imported | See [Getting the full history](#getting-the-full-history) |
 | `Execution context was destroyed` / `Runtime.callFunctionOn timed out` at startup | WhatsApp Web reloaded during login or the first sync was slow. The bridge retries 3 times; if it still fails, start it again or raise `WHATSAPP_TIMEOUT_MS` |
 | `minified error "r"` / `r: r` | See [WhatsApp Web incompatibility](#whatsapp-web-incompatibility) |
+
+### Getting the full history
+
+The bridge can only import what your phone sends to the linked device. The phone sends history in batches, and only while WhatsApp is **running and online on the phone**. iPhones suspend WhatsApp shortly after it goes to the background, which pauses the sync.
+
+While the history imports:
+
+- Keep WhatsApp **open in the foreground** on the phone, with the screen on: set Auto-Lock to "Never" temporarily (Settings → Display & Brightness), or open the group and leave it there.
+- Keep the phone **charging and on Wi-Fi**, with Low Power Mode off.
+- Watch the logs. `History sync brought more media` means it's progressing. `Asked the phone for older history` means the bridge is asking for the next batch. `The phone has no older history for this group` means you've reached the start.
+
+If an earlier run marked the history as complete too early, scan again (already imported media is skipped):
+
+```bash
+npm run ctl rescan                                    # local
+docker compose exec bridge node src/cli.js rescan     # Docker
+# then restart the bridge
+```
+
+Media older than what WhatsApp keeps on its servers shows as `unavailable` and can't be downloaded through a linked device. For that, export the chat with media from the phone.
 
 ### WhatsApp Web incompatibility
 
