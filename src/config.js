@@ -68,6 +68,7 @@ export function loadConfig(env = process.env) {
     groupId: str('WHATSAPP_GROUP_ID') ?? (source === 'fixtures' ? FIXTURE_GROUP_ID : undefined),
     chromiumPath: str('PUPPETEER_EXECUTABLE_PATH'),
     whatsappTimeoutMs: int('WHATSAPP_TIMEOUT_MS', 600_000, 10_000),
+    whatsappReadyTimeoutMs: int('WHATSAPP_READY_TIMEOUT_MS', 300_000, 10_000),
     watchNewMessages: bool('WATCH_NEW_MESSAGES', true),
     paths: {
       dataDir,

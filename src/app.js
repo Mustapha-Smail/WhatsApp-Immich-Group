@@ -102,6 +102,6 @@ function createSource(config, logger) {
     ? new FixtureSource({ dir: config.fixturesDir, logger: sourceLogger })
     : new WhatsAppSource({
       authDir: config.paths.authDir, cacheDir: config.paths.webCacheDir, chromiumPath: config.chromiumPath,
-      protocolTimeoutMs: config.whatsappTimeoutMs, logger: sourceLogger,
+      protocolTimeoutMs: config.whatsappTimeoutMs, readyTimeoutMs: config.whatsappReadyTimeoutMs, logger: sourceLogger,
     });
 }
