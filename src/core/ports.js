@@ -15,6 +15,7 @@
  * @property {() => Promise<void>} connect
  * @property {() => Promise<Array<{id: string, name: string}>>} listGroups
  * @property {(groupId: string, limit: number) => Promise<IncomingMessage[]>} fetchHistory  limit 0 = all available
+ * @property {(groupId: string) => Promise<number>} [historySize]  Optional; media available so far, used to wait for history sync
  * @property {() => Promise<void>} disconnect
  *
  * @typedef {object} UploadRequest

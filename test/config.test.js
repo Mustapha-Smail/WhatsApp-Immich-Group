@@ -13,7 +13,7 @@ describe('config', () => {
     assert.equal(config.source, 'whatsapp');
     assert.equal(config.immich.albumName, 'Family WhatsApp');
     assert.equal(config.media.maxBytes, 200 * 1024 * 1024);
-    assert.deepEqual(config.backfill, { enabled: true, limit: 0, once: true, delayMs: 250 });
+    assert.deepEqual(config.backfill, { enabled: true, limit: 0, once: true, delayMs: 250, settleMs: 180_000, maxWaitMs: 3_600_000 });
     assert.equal(config.paths.database, path.resolve('data', 'state.sqlite'));
   });
 
