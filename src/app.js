@@ -1,4 +1,6 @@
 import fs from 'node:fs';
+import path from 'node:path';
+import { openIosExport } from './adapters/export/iosChatExport.js';
 import { FixtureSource } from './adapters/fixtures/fixtureSource.js';
 import { DryRunLibrary } from './adapters/immich/dryRunLibrary.js';
 import { ImmichLibrary } from './adapters/immich/immichLibrary.js';
@@ -6,6 +8,7 @@ import { SqliteJobRepository } from './adapters/sqlite/sqliteJobRepository.js';
 import { FileMediaStore } from './adapters/storage/fileMediaStore.js';
 import { WhatsAppSource } from './adapters/whatsapp/whatsappSource.js';
 import { Backfill } from './core/backfill.js';
+import { ExportImporter } from './core/exportImporter.js';
 import { MediaImporter } from './core/mediaImporter.js';
 import { UploadWorker } from './core/uploadWorker.js';
 import { createLogger } from './logger.js';
@@ -75,6 +78,24 @@ export function createApp(config, deps = {}) {
   }
 
   return { start, stop, jobs, library, source, worker };
+}
+
+/**
+ * Wiring for `cli import-export`. Always uses the real state database, even with DRY_RUN set, so it
+ * can see what the bridge imported; `dryRun` only prevents writes.
+ */
+export function createExportImport(config, { dryRun = false, logger = createLogger(config.log), fetch } = {}) {
+  const { url, apiKey, albumName, deviceId, timeoutMs } = config.immich;
+  if (!url || !apiKey) throw new Error('IMMICH_URL and IMMICH_API_KEY are required to import a chat export');
+  const immich = new ImmichLibrary({ url, apiKey, albumName, deviceId, timeoutMs, fetch, logger: logger.child({ component: 'immich' }) });
+  const library = dryRun ? new DryRunLibrary({ albumName, probe: immich, logger: logger.child({ component: 'immich' }) }) : immich;
+  fs.mkdirSync(config.paths.dataDir, { recursive: true });
+  const jobs = new SqliteJobRepository(path.join(config.paths.dataDir, 'state.sqlite'));
+  const importer = new ExportImporter({
+    openExport: openIosExport, library, jobs, workDir: path.join(config.paths.dataDir, 'imports', '.work'),
+    logger: logger.child({ component: 'export' }),
+  });
+  return { importer, library, close: () => jobs.close() };
 }
 
 function prepareDataDir({ dryRun, paths }) {

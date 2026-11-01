@@ -35,5 +35,10 @@ export class DryRunLibrary {
     return { assetId: `dry-run:${deviceAssetId}`, duplicate: false };
   }
 
+  /** Read-only, so it asks the real Immich when credentials are set. */
+  async findExisting(items) {
+    return this.probe ? this.probe.findExisting(items) : new Map();
+  }
+
   async addToAlbum() {}
 }

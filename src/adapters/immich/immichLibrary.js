@@ -8,6 +8,7 @@ export const REQUIRED_PERMISSIONS = {
   'GET /albums': 'album.read',
   'POST /albums': 'album.create',
   'POST /assets': 'asset.upload',
+  'POST /assets/bulk-upload-check': 'asset.upload',
   'PUT /albums/{id}/assets': 'albumAsset.create',
 };
 
@@ -58,6 +59,21 @@ export class ImmichLibrary {
     const result = await this.#request('POST', '/assets', { form });
     if (!result?.id) throw new ImmichError(`Upload returned no asset id: ${JSON.stringify(result)}`);
     return { assetId: result.id, duplicate: result.status === 'duplicate' };
+  }
+
+  /**
+   * Which files Immich already has, by SHA-1, without uploading them.
+   * @param {Array<{id: string, checksum: string}>} items  checksum = hex SHA-1
+   * @returns {Promise<Map<string, string>>} id -> existing asset id
+   */
+  async findExisting(items) {
+    const existing = new Map();
+    if (!items.length) return existing;
+    const { results } = await this.#request('POST', '/assets/bulk-upload-check', { json: { assets: items } });
+    for (const result of results ?? []) {
+      if (result.action === 'reject' && result.reason === 'duplicate' && result.assetId) existing.set(result.id, result.assetId);
+    }
+    return existing;
   }
 
   async addToAlbum(assetId) {

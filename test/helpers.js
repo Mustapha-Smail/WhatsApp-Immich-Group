@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { SqliteJobRepository } from '../src/adapters/sqlite/sqliteJobRepository.js';
 import { FileMediaStore } from '../src/adapters/storage/fileMediaStore.js';
 import { loadConfig } from '../src/config.js';
@@ -57,4 +58,43 @@ export function tempStore() {
 
 export function testConfig(env = {}) {
   return loadConfig({ DATA_DIR: tempDir(), WHATSAPP_GROUP_ID: GROUP, BACKFILL_DELAY_MS: '0', ...env });
+}
+
+/** Writes an uncompressed ZIP archive, enough to exercise the export reader. */
+export function writeZip(file, entries) {
+  const locals = [];
+  const centrals = [];
+  let offset = 0;
+  for (const [name, content] of Object.entries(entries)) {
+    const data = Buffer.from(content);
+    const nameBytes = Buffer.from(name);
+    const crc = zlib.crc32(data);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(nameBytes.length, 26);
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt32LE(crc, 16);
+    central.writeUInt32LE(data.length, 20);
+    central.writeUInt32LE(data.length, 24);
+    central.writeUInt16LE(nameBytes.length, 28);
+    central.writeUInt32LE(offset, 42);
+    locals.push(local, nameBytes, data);
+    centrals.push(central, nameBytes);
+    offset += local.length + nameBytes.length + data.length;
+  }
+  const centralSize = centrals.reduce((n, b) => n + b.length, 0);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(Object.keys(entries).length, 8);
+  end.writeUInt16LE(Object.keys(entries).length, 10);
+  end.writeUInt32LE(centralSize, 12);
+  end.writeUInt32LE(offset, 16);
+  fs.writeFileSync(file, Buffer.concat([...locals, ...centrals, end]));
 }

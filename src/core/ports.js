@@ -30,6 +30,7 @@
  * @property {() => Promise<void>} verifyAccess  Read-only check; throws when misconfigured
  * @property {(req: UploadRequest) => Promise<{assetId: string, duplicate: boolean}>} upload
  * @property {(assetId: string) => Promise<void>} addToAlbum
+ * @property {(items: Array<{id: string, checksum: string}>) => Promise<Map<string, string>>} [findExisting]  id -> existing asset id
  *
  * @typedef {object} Job
  * @property {string} id
