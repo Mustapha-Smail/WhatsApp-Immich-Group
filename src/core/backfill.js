@@ -172,10 +172,11 @@ export class Backfill {
     try {
       const result = await this.source.requestOlderHistory(this.groupId);
       if (result?.endOfHistory) {
-        this.logger.info('The phone has no older history for this group', { phoneState: result.state });
+        this.logger.info(result.detail ?? 'The phone has no older history for this group', { phoneState: result.state });
         return 'end';
       }
-      this.logger.info('Asked the phone for older history', { phoneState: result?.state, ...progress });
+      this.logger.info(result?.requested === false ? 'Waiting for WhatsApp to sync more history' : 'Asked the phone for older history',
+        { phoneState: result?.state, ...progress });
       return 'more';
     } catch (err) {
       this.logger.warn('Could not ask the phone for older history; trying again on next start', { err });

@@ -115,25 +115,38 @@ async function historyInPage(chatId, limit, countOnly) {
 /**
  * Runs inside WhatsApp Web: sends the on-demand history sync request that WhatsApp Web uses to fetch
  * older messages from the phone (peer data operation 3), like whatsapp-web.js's syncHistory().
- * That one only asks when endOfHistoryTransferType is 0; here we keep asking unless it says the
- * phone has nothing older (1), so syncs that paused can be resumed.
+ *
+ * The chat's endOfHistoryTransferType uses WhatsApp Web's own numbering, not the protobuf enum's
+ * (reverse engineered in whatsapp-web.js#201890 and WinZapp_Python#220):
+ *   0 more history can be requested    2 initial sync still in progress (Web does not request)
+ *   4 the rest is only on the phone    5 more on the phone, requestable behind feature flags
+ * 1 is treated as "nothing older"; it is the only value both numberings agree on.
  */
-async function requestHistoryInPage(chatId) {
+export async function requestHistoryInPage(chatId) {
   const collections = window.require('WAWebCollections');
   const chatWid = window.require('WAWebWidFactory').createWid(chatId);
   const chat = collections.Chat.get(chatWid) ?? (await collections.Chat.find(chatWid));
   if (!chat) return null;
   const transferType = chat.endOfHistoryTransferType ?? null;
-  if (transferType === 1) return { requested: false, endOfHistory: true, transferType };
+  if (transferType === 1 || transferType === 4) return { requested: false, endOfHistory: true, transferType };
+  if (transferType === 2) return { requested: false, endOfHistory: false, transferType };
   await window.require('WAWebSendNonMessageDataRequest').sendPeerDataOperationRequest(3, { chatId: chat.id });
   return { requested: true, endOfHistory: false, transferType };
 }
 
-// WhatsApp's EndOfHistoryTransferType (Conversation proto), as reported for the chat.
-const TRANSFER_STATES = { 0: 'more-on-phone', 1: 'none-left', 2: 'more-on-phone-after-on-demand-sync' };
+const TRANSFER_STATES = {
+  0: { state: 'more-on-phone' },
+  1: { state: 'none-left', detail: 'The phone has no older history for this group' },
+  2: { state: 'initial-sync-in-progress' },
+  4: { state: 'phone-only',
+    detail: 'WhatsApp lets linked devices fetch history only up to here; older media is only on the phone (export the chat from the phone to get it)' },
+  5: { state: 'more-on-phone-restricted' },
+};
 
+/** Names a chat's endOfHistoryTransferType, with an explanation for terminal states. */
 export function describeTransferType(transferType) {
-  return TRANSFER_STATES[transferType] ?? (transferType == null ? 'not-reported' : `unknown-${transferType}`);
+  return TRANSFER_STATES[transferType]
+    ?? { state: transferType == null ? 'not-reported' : `unknown-${transferType}` };
 }
 
 /** Turns downloadInPage's result into the core's shape. */
@@ -366,7 +379,7 @@ export class WhatsAppSource {
       throw explainWhatsAppError(err, 'the history sync request');
     }
     if (result == null) throw new Error(`WhatsApp chat ${groupId} not found; check WHATSAPP_GROUP_ID`);
-    return { ...result, state: describeTransferType(result.transferType) };
+    return { ...result, ...describeTransferType(result.transferType) };
   }
 
   async #history(groupId, limit, countOnly) {
