@@ -180,8 +180,41 @@ npm run ctl <command>                                    # local
 | `retry-failed` | Re-queues jobs that failed permanently, e.g. after fixing the API key |
 | `rescan` | Scans the group's history again on the next start; already imported media is skipped |
 | `doctor` | Read-only check of configuration, WhatsApp session and Immich access |
+| `import-export <zip>` | Imports what's missing from an iPhone chat export; see [Importing a chat export](#importing-a-chat-export-iphone) |
 
 Add `DRY_RUN=true` (e.g. `docker compose exec -e DRY_RUN=true ...`) to act on the dry-run state instead.
+
+### Importing a chat export (iPhone)
+
+WhatsApp only lets a linked device fetch a group's history up to a limit (`phoneState=phone-only` in the logs). Older photos and videos are only on your phone. A chat export gets them, and `import-export` imports only what's missing from Immich.
+
+1. **Export on the phone.** Open the group → tap its name → **Export Chat** → **Attach Media**. Save the ZIP to Files, or AirDrop it to your computer. This can only be done on the phone; there's no way for the bridge or any linked device to request an export.
+2. **Copy it to the server**, into the data folder:
+   ```bash
+   scp "WhatsApp Chat - Journal de la famille.zip" server:/opt/wa-immich-bridge/data/imports/
+   ```
+3. **Preview, then import:**
+   ```bash
+   docker compose exec bridge node src/cli.js import-export "/data/imports/WhatsApp Chat - Journal de la famille.zip" --dry-run
+   docker compose exec bridge node src/cli.js import-export "/data/imports/WhatsApp Chat - Journal de la famille.zip"
+   ```
+   Locally: `npm run ctl import-export <path-to-zip>`.
+
+The command shows the group name, how many photos and videos the export contains and their date range, then asks for confirmation (`--yes` skips the question). It works with the ZIP file directly, or with an unzipped folder.
+
+**What counts as missing.** A photo or video is skipped when any of these is true:
+- an earlier run of the import already uploaded it;
+- Immich already has the exact same file. It's added to the album, not uploaded again;
+- the bridge already imported a photo or video of the same kind, sent at the same second. Several photos sent together (an album) are matched one to one, so none is skipped wrongly.
+
+Everything else is uploaded with the date it was sent and added to the album. Re-running the command is safe: it continues where it stopped and retries failures.
+
+**Dates.** Export file names carry the phone's local time, and Docker containers run in UTC. Set your phone's time zone with `EXPORT_TIMEZONE=Europe/Paris` in `.env`, or pass `--timezone Europe/Paris`. Otherwise dates can be off by a few hours, and the "same second" check won't recognise what the bridge already imported.
+
+**Limits.**
+- iPhone exports only, for now.
+- Photos, videos and GIFs are imported; voice notes, stickers and documents are ignored.
+- WhatsApp limits how many recent messages an export with media includes, so a very long history may not be complete. The command shows the date range it found.
 
 ### Pause and resume
 
@@ -220,6 +253,7 @@ All settings are environment variables (`.env`). Invalid values are reported tog
 | `DATA_DIR` | `./data` (`/data` in Docker) | Session, queue and pending media |
 | `PUPPETEER_EXECUTABLE_PATH` | (Puppeteer's Chrome; Docker: `/usr/bin/chromium`) | Browser used for WhatsApp Web |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+| `EXPORT_TIMEZONE` | `TZ`, else the system's | Your phone's time zone, for `import-export` dates, e.g. `Europe/Paris` |
 | `LOG_FORMAT` | `pretty` | `json` for log collectors (Loki, ELK, ...) |
 
 ## Development and tests
@@ -285,7 +319,7 @@ docker compose exec bridge node src/cli.js rescan     # Docker
 # then restart the bridge
 ```
 
-Two kinds of media can't be imported through a linked device: history beyond the `phone-only` limit, and media older than what WhatsApp keeps on its servers (logged as `unavailable`). For those, export the chat with media from the phone (WhatsApp → group → Export chat → Attach Media).
+Two kinds of media can't be imported through a linked device: history beyond the `phone-only` limit, and media older than what WhatsApp keeps on its servers (logged as `unavailable`). For those, [import a chat export](#importing-a-chat-export-iphone) from the phone.
 
 ### WhatsApp Web incompatibility
 

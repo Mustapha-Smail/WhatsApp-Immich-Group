@@ -17,6 +17,15 @@ const MIGRATIONS = [
   `ALTER TABLE jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
    ALTER TABLE jobs ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0;
    CREATE INDEX IF NOT EXISTS jobs_queue ON jobs (status, next_attempt_at, timestamp);`,
+  // v3: media imported from phone chat exports, keyed by content, so re-running an import resumes.
+  `CREATE TABLE IF NOT EXISTS export_items (
+     sha1 TEXT PRIMARY KEY,
+     name TEXT NOT NULL,
+     taken_at INTEGER NOT NULL,
+     status TEXT NOT NULL,
+     asset_id TEXT,
+     updated_at INTEGER NOT NULL
+   );`,
 ];
 
 const PAUSED_KEY = 'paused';
@@ -50,6 +59,12 @@ export class SqliteJobRepository {
                              ORDER BY timestamp DESC LIMIT ?`),
       resetBackfill: prepare("DELETE FROM settings WHERE key LIKE 'backfill:%'"),
       getSetting: prepare('SELECT value FROM settings WHERE key = ?'),
+      exportItem: prepare('SELECT * FROM export_items WHERE sha1 = ?'),
+      recordExportItem: prepare(`INSERT INTO export_items (sha1, name, taken_at, status, asset_id, updated_at)
+                                 VALUES (@sha1, @name, @takenAt, @status, @assetId, @updatedAt)
+                                 ON CONFLICT(sha1) DO UPDATE SET status = excluded.status, asset_id = excluded.asset_id,
+                                   updated_at = excluded.updated_at`),
+      bridgeMedia: prepare("SELECT timestamp, mimetype FROM jobs WHERE status != 'failed'"),
       setSetting: prepare(`INSERT INTO settings (key, value) VALUES (?, ?)
                            ON CONFLICT(key) DO UPDATE SET value = excluded.value`),
     };
@@ -107,6 +122,21 @@ export class SqliteJobRepository {
   /** Forgets completed history scans, so the next start scans again. */
   resetBackfill() {
     return this.#sql.resetBackfill.run().changes;
+  }
+
+  /** @returns {{status: string, assetId: string|null}|undefined} what an earlier export import did with this file */
+  exportItem(sha1) {
+    const row = this.#sql.exportItem.get(sha1);
+    return row && { status: row.status, assetId: row.asset_id };
+  }
+
+  recordExportItem({ sha1, name, takenAt, status, assetId = null }) {
+    this.#sql.recordExportItem.run({ sha1, name, takenAt, status, assetId, updatedAt: Date.now() });
+  }
+
+  /** Send time (Unix seconds) and kind of every message the bridge itself imported or queued. */
+  bridgeMedia() {
+    return this.#sql.bridgeMedia.all().map(row => ({ timestamp: row.timestamp, kind: row.mimetype.split('/')[0] }));
   }
 
   isPaused() {

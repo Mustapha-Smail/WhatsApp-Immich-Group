@@ -22,6 +22,7 @@ function fakeImmich({ albums = [], responses = {} } = {}) {
       case 'POST /albums': return Response.json({ id: ALBUM_ID, albumName: JSON.parse(init.body).albumName }, { status: 201 });
       case 'POST /assets': return Response.json({ id: ASSET_ID, status: 'created' }, { status: 201 });
       case 'PUT /albums/{id}/assets': return Response.json(JSON.parse(init.body).ids.map(id => ({ id, success: true })));
+      case 'POST /assets/bulk-upload-check': return Response.json({ results: [] });
       default: return new Response('not found', { status: 404 });
     }
   };
@@ -62,6 +63,22 @@ describe('ImmichLibrary', () => {
   it('reports server-side duplicates', async () => {
     const immich = fakeImmich({ responses: { 'POST /assets': () => Response.json({ id: ASSET_ID, status: 'duplicate' }) } });
     assert.equal((await library(immich).upload(uploadRequest(mediaFile()))).duplicate, true);
+  });
+
+  it('finds files Immich already has by checksum, without uploading', async () => {
+    let body;
+    const immich = fakeImmich({ responses: { 'POST /assets/bulk-upload-check': init => {
+      body = JSON.parse(init.body);
+      return Response.json({ results: [
+        { id: 'a', action: 'reject', reason: 'duplicate', assetId: ASSET_ID },
+        { id: 'b', action: 'accept' },
+        { id: 'c', action: 'reject', reason: 'unsupported-format' },
+      ] });
+    } } });
+    const existing = await library(immich).findExisting([{ id: 'a', checksum: 'aa' }, { id: 'b', checksum: 'bb' }, { id: 'c', checksum: 'cc' }]);
+    assert.deepEqual([...existing], [['a', ASSET_ID]]);
+    assert.deepEqual(body, { assets: [{ id: 'a', checksum: 'aa' }, { id: 'b', checksum: 'bb' }, { id: 'c', checksum: 'cc' }] });
+    assert.equal((await library(immich).findExisting([])).size, 0);
   });
 
   it('creates the album once, then reuses it', async () => {
@@ -120,6 +137,7 @@ describe('ImmichLibrary', () => {
     await lib.verifyAccess();
     const { assetId } = await lib.upload(uploadRequest(mediaFile()));
     await lib.addToAlbum(assetId);
+    await lib.findExisting([{ id: 'x', checksum: 'x' }]);
 
     const allowed = new Set(Object.keys(REQUIRED_PERMISSIONS));
     for (const call of immich.calls) {
