@@ -202,6 +202,7 @@ All settings are environment variables (`.env`). Invalid values are reported tog
 | `IMMICH_TIMEOUT_MS` | `120000` | Per-request timeout; raise it for large videos on slow links |
 | `WHATSAPP_GROUP_ID` | (empty) | Group to import; leave empty to list your groups |
 | `WATCH_NEW_MESSAGES` | `true` | Import new messages as they arrive |
+| `WHATSAPP_READY_TIMEOUT_MS` | `300000` | Restart the WhatsApp login when it shows no progress (QR, login, loading) for this long before becoming ready |
 | `WHATSAPP_TIMEOUT_MS` | `600000` | Max time for one WhatsApp Web call; the first sync and long histories are slow |
 | `MAX_MEDIA_MB` | `200` | Skip larger files |
 | `BACKFILL_ENABLED` | `true` | Scan history at startup |
@@ -253,6 +254,7 @@ The tests use Node's built-in runner (`node:test`) and run in about a second. Th
 | QR code keeps reappearing | The session expired or was unlinked on the phone; scan again |
 | Only recent media imported | See [Getting the full history](#getting-the-full-history) |
 | `Execution context was destroyed` / `Runtime.callFunctionOn timed out` at startup | WhatsApp Web reloaded during login or the first sync was slow. The bridge retries 3 times; if it still fails, start it again or raise `WHATSAPP_TIMEOUT_MS` |
+| Stuck after `WhatsApp authenticated` | WhatsApp Web is loading, usually waiting for the phone. Keep WhatsApp open on the phone. `Loading WhatsApp Web percent=...` shows progress; with no progress for `WHATSAPP_READY_TIMEOUT_MS` (5 min) the bridge restarts the login, and after 3 failed attempts it exits so Docker restarts it |
 | `minified error "r"` / `r: r` | See [WhatsApp Web incompatibility](#whatsapp-web-incompatibility) |
 
 ### Getting the full history

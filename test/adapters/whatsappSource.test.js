@@ -89,7 +89,7 @@ describe('clearStaleChromiumLocks', () => {
 });
 
 /** Fake whatsapp-web.js: each `initialize` takes the next scripted outcome. */
-function fakeWhatsApp(outcomes, { getChats, evaluate } = {}) {
+function fakeWhatsApp(outcomes, { getChats, evaluate, ...sourceOptions } = {}) {
   class Message {
     constructor(client, data) {
       Object.assign(this, { id: data.id, hasMedia: Boolean(data.directPath), from: data.from, to: data.to,
@@ -108,6 +108,14 @@ function fakeWhatsApp(outcomes, { getChats, evaluate } = {}) {
     async initialize() {
       const outcome = outcomes.shift();
       if (outcome instanceof Error) throw outcome;
+      if (outcome === 'hang') return; // never becomes ready
+      if (outcome === 'slow') {
+        // Loads with progress, each step well within the watchdog delay.
+        for (const percent of [10, 50, 100]) {
+          await new Promise(resolve => setTimeout(resolve, 20));
+          this.emit('loading_screen', percent, 'WhatsApp');
+        }
+      }
       this.emit('authenticated');
       this.emit('authenticated');
       this.emit('ready');
@@ -115,11 +123,13 @@ function fakeWhatsApp(outcomes, { getChats, evaluate } = {}) {
     async getChats() { return getChats ? getChats() : []; }
     async destroy() { this.destroyed = true; }
   }
+  const logger = silentLogger();
   const source = new WhatsAppSource({
-    authDir: tempDir(), cacheDir: '/data/web-cache', logger: silentLogger(), retryDelayMs: 0,
+    authDir: tempDir(), cacheDir: '/data/web-cache', logger, retryDelayMs: 0,
     loadLibraries: async () => ({ Client, LocalAuth: class {}, Message, qrcode: { generate() {} } }),
+    ...sourceOptions,
   });
-  return { source, clients };
+  return { source, clients, logger };
 }
 
 describe('WhatsAppSource', () => {
@@ -143,6 +153,21 @@ describe('WhatsAppSource', () => {
     const { source, clients } = fakeWhatsApp([new Error('auth broke'), 'ok']);
     await assert.rejects(source.connect(), /auth broke/);
     assert.equal(clients.length, 1);
+  });
+
+  it('restarts a login that stops making progress before becoming ready', async () => {
+    const { source, clients } = fakeWhatsApp(['hang', 'ok'], { readyTimeoutMs: 30 });
+    await source.connect();
+    assert.equal(clients.length, 2);
+    assert.ok(clients[0].destroyed);
+  });
+
+  it('keeps waiting while WhatsApp Web reports loading progress, and logs it', async () => {
+    const { source, clients, logger } = fakeWhatsApp(['slow'], { readyTimeoutMs: 50 });
+    await source.connect();
+    assert.equal(clients.length, 1);
+    assert.deepEqual(logger.entries.filter(e => e.msg === 'Loading WhatsApp Web').map(e => e.percent), [10, 50, 100]);
+    assert.equal(clients[0].listenerCount('loading_screen'), 1, 'watchdog listeners are removed after ready');
   });
 
   it('falls back to a lighter group lookup when getChats fails', async () => {

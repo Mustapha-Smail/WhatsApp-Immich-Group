@@ -219,9 +219,10 @@ export class WhatsAppSource {
   #messageHandlers = [];
   #disconnectHandlers = [];
 
-  constructor({ authDir, cacheDir, chromiumPath, protocolTimeoutMs = 600_000, logger, connectAttempts = 3,
-    retryDelayMs = 5000, loadLibraries = loadWhatsAppLibraries }) {
-    Object.assign(this, { authDir, cacheDir, chromiumPath, protocolTimeoutMs, logger, connectAttempts, retryDelayMs, loadLibraries });
+  constructor({ authDir, cacheDir, chromiumPath, protocolTimeoutMs = 600_000, readyTimeoutMs = 300_000, logger,
+    connectAttempts = 3, retryDelayMs = 5000, loadLibraries = loadWhatsAppLibraries }) {
+    Object.assign(this, { authDir, cacheDir, chromiumPath, protocolTimeoutMs, readyTimeoutMs, logger, connectAttempts,
+      retryDelayMs, loadLibraries });
   }
 
   onMessage(handler) {
@@ -278,7 +279,15 @@ export class WhatsAppSource {
     client.once('qr', () => this.logger.info('Scan this QR code in WhatsApp > Settings > Linked Devices > Link a Device'));
     client.on('qr', qr => qrcode.generate(qr, { small: true }));
     // whatsapp-web.js may emit this several times per login.
-    client.once('authenticated', () => this.logger.info('WhatsApp authenticated'));
+    client.once('authenticated', () => this.logger.info(
+      'WhatsApp authenticated; waiting for WhatsApp Web to load (keep the phone online with WhatsApp open)'));
+    let lastPercent;
+    client.on('loading_screen', percent => {
+      if (percent === lastPercent) return;
+      lastPercent = percent;
+      this.logger.info('Loading WhatsApp Web', { percent });
+    });
+    client.on('change_state', state => this.logger.info('WhatsApp state changed', { state }));
     // message_create also fires for messages we send ourselves.
     client.on('message_create', msg => {
       const message = toIncomingMessage(msg, this.#download);
@@ -288,11 +297,29 @@ export class WhatsAppSource {
       for (const handler of this.#disconnectHandlers) handler(String(reason));
     });
 
-    await new Promise((resolve, reject) => {
-      client.once('ready', resolve);
-      client.once('auth_failure', msg => reject(new Error(`WhatsApp authentication failed: ${msg}`)));
-      client.initialize().catch(reject);
-    });
+    // whatsapp-web.js waits for `ready` forever. Give up when nothing has happened for readyTimeoutMs;
+    // the message contains "timed out", so connect() retries with a fresh browser.
+    const progressEvents = ['qr', 'authenticated', 'loading_screen', 'change_state'];
+    let watchdog;
+    let arm;
+    try {
+      await new Promise((resolve, reject) => {
+        arm = () => {
+          clearTimeout(watchdog);
+          watchdog = setTimeout(() => reject(new Error(
+            `WhatsApp Web timed out: no progress for ${Math.round(this.readyTimeoutMs / 1000)}s before becoming ready`)),
+          this.readyTimeoutMs);
+        };
+        for (const event of progressEvents) client.on(event, arm);
+        arm();
+        client.once('ready', resolve);
+        client.once('auth_failure', msg => reject(new Error(`WhatsApp authentication failed: ${msg}`)));
+        client.initialize().catch(reject);
+      });
+    } finally {
+      clearTimeout(watchdog);
+      for (const event of progressEvents) client.off(event, arm);
+    }
   }
 
   async listGroups() {
