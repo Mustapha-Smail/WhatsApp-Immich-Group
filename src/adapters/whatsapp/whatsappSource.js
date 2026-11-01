@@ -112,6 +112,23 @@ async function historyInPage(chatId, limit, countOnly) {
   });
 }
 
+/**
+ * Runs inside WhatsApp Web: sends the on-demand history sync request that WhatsApp Web uses to fetch
+ * older messages from the phone (peer data operation 3), like whatsapp-web.js's syncHistory().
+ * That one only asks when endOfHistoryTransferType is 0; here we keep asking unless it says the
+ * phone has nothing older (1), so syncs that paused can be resumed.
+ */
+async function requestHistoryInPage(chatId) {
+  const collections = window.require('WAWebCollections');
+  const chatWid = window.require('WAWebWidFactory').createWid(chatId);
+  const chat = collections.Chat.get(chatWid) ?? (await collections.Chat.find(chatWid));
+  if (!chat) return null;
+  const transferType = chat.endOfHistoryTransferType ?? null;
+  if (transferType === 1) return { requested: false, endOfHistory: true, transferType };
+  await window.require('WAWebSendNonMessageDataRequest').sendPeerDataOperationRequest(3, { chatId: chat.id });
+  return { requested: true, endOfHistory: false, transferType };
+}
+
 /** Turns downloadInPage's result into the core's shape. */
 export function interpretDownload(result) {
   if (result?.status === 'ok') return { mimetype: result.mimetype, data: Buffer.from(result.data, 'base64') };
@@ -304,6 +321,19 @@ export class WhatsAppSource {
   /** Number of photos and videos currently available in the group; grows while history syncs. */
   async historySize(groupId) {
     return this.#history(groupId, 0, true);
+  }
+
+  /** Asks the phone to send older messages for the group. */
+  async requestOlderHistory(groupId) {
+    let result;
+    try {
+      result = await this.#client.pupPage.evaluate(requestHistoryInPage, groupId);
+    } catch (err) {
+      throw explainWhatsAppError(err, 'the history sync request');
+    }
+    if (result == null) throw new Error(`WhatsApp chat ${groupId} not found; check WHATSAPP_GROUP_ID`);
+    this.logger.debug('History sync request', result);
+    return result;
   }
 
   async #history(groupId, limit, countOnly) {

@@ -136,4 +136,65 @@ describe('Backfill', () => {
       assert.equal(source.fetches, 1);
     });
   });
+
+  describe('asking the phone for older history', () => {
+    function requesting(replies, { sizes = [1], ...options } = {}) {
+      let clock = 0;
+      const requestsAt = [];
+      const ctx = setup([fakeMessage()], {
+        settleMs: 30, syncPollMs: 10, requestIntervalMs: 20, now: () => clock, sleep: async ms => { clock += ms; }, ...options,
+      });
+      ctx.source.historySize = async () => {
+        const size = sizes.length > 1 ? sizes.shift() : sizes[0];
+        return typeof size === 'function' ? size() : size;
+      };
+      ctx.source.requestOlderHistory = async () => {
+        requestsAt.push(clock);
+        const reply = replies.length > 1 ? replies.shift() : replies[0];
+        if (reply instanceof Error) throw reply;
+        return reply;
+      };
+      return { ...ctx, requestsAt, clock: () => clock };
+    }
+
+    it('keeps asking while the sync is quiet, until the phone has nothing older', async () => {
+      const { backfill, jobs, requestsAt, clock } = requesting([{ endOfHistory: false }, { endOfHistory: false }, { endOfHistory: true }]);
+      const result = await backfill.run();
+      assert.deepEqual(requestsAt, [20, 40, 60]);
+      assert.equal(clock(), 90, 'settles settleMs after the phone reported the end of history');
+      assert.equal(result.status, 'complete');
+      assert.equal(jobs.getSetting(backfill.marker), 'complete');
+    });
+
+    it('does not ask while media is still arriving', async () => {
+      let n = 0;
+      const { backfill, requestsAt } = requesting([{ endOfHistory: true }], { sizes: [0, () => (n < 5 ? ++n : n)] });
+      await backfill.run();
+      // Media grew on every poll until t=40; the first request comes requestIntervalMs after that.
+      assert.deepEqual(requestsAt, [60]);
+    });
+
+    it('falls back to waiting for the sync when the request fails', async () => {
+      const { backfill, requestsAt } = requesting([new Error('not supported')]);
+      const result = await backfill.run();
+      assert.equal(requestsAt.length, 1);
+      assert.equal(result.status, 'complete');
+    });
+
+    it('has no time limit by default', async () => {
+      let clock = 0;
+      let ctx;
+      ctx = requesting([{ endOfHistory: false }], {
+        now: () => clock,
+        sleep: async ms => {
+          clock += ms;
+          if (ctx.requestsAt.length >= 50) ctx.backfill.stop();
+        },
+      });
+      const result = await ctx.backfill.run();
+      assert.equal(ctx.requestsAt.length, 50);
+      assert.equal(result.status, 'stopped');
+      assert.equal(ctx.jobs.getSetting(ctx.backfill.marker), undefined);
+    });
+  });
 });

@@ -10,6 +10,7 @@ const USAGE = `Usage: node src/cli.js <command>
   pause         Pause uploads and backfill (the running bridge stops within seconds)
   resume        Resume uploads and backfill
   retry-failed  Re-queue jobs that failed permanently
+  rescan        Scan the group's history again on next start (already imported media is skipped)
   doctor        Check configuration and Immich access (read-only)
 
 Uses the same environment as the bridge (DATA_DIR, DRY_RUN, ...).`;
@@ -44,6 +45,12 @@ const commands = {
     const jobs = openJobs(config);
     console.log(`Re-queued ${jobs.retryFailed()} failed job(s).`);
     jobs.close();
+  },
+  rescan(config) {
+    const jobs = openJobs(config);
+    const cleared = jobs.resetBackfill();
+    jobs.close();
+    console.log(cleared ? 'History will be scanned again on next start (restart the bridge).' : 'No completed history scan to reset.');
   },
   async doctor(config) {
     let ok = true;

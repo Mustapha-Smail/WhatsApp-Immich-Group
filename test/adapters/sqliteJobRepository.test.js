@@ -50,6 +50,15 @@ describe('SqliteJobRepository', () => {
     assert.equal(retried.attempts, 0);
   });
 
+  it('forgets completed history scans on reset', () => {
+    const jobs = memoryJobs();
+    jobs.setSetting('backfill:v2:g@g.us:0', 'complete');
+    jobs.setPaused(true);
+    assert.equal(jobs.resetBackfill(), 1);
+    assert.equal(jobs.getSetting('backfill:v2:g@g.us:0'), undefined);
+    assert.equal(jobs.isPaused(), true);
+  });
+
   it('stores the pause flag and settings', () => {
     const jobs = memoryJobs();
     assert.equal(jobs.isPaused(), false);

@@ -24,6 +24,11 @@ describe('control CLI', () => {
     assert.match(run(['status'], { ...env, DRY_RUN: 'true' }), /Paused:\s+yes/);
   });
 
+  it('resets a completed history scan', () => {
+    const env = { DATA_DIR: tempDir() };
+    assert.match(run(['rescan'], env), /No completed history scan/);
+  });
+
   it('prints usage for unknown commands', () => {
     assert.throws(() => run(['nope'], {}), err => /Usage/.test(err.stdout));
   });

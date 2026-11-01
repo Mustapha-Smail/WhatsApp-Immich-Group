@@ -1,6 +1,6 @@
 {
   "name": "wa-immich-bridge",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "private": true,
   "description": "Imports photos and videos from a WhatsApp group into an Immich album",
   "type": "module",

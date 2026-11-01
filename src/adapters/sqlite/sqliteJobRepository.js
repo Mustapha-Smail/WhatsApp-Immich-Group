@@ -48,6 +48,7 @@ export class SqliteJobRepository {
       stats: prepare('SELECT status, COUNT(*) AS count FROM jobs GROUP BY status'),
       recentErrors: prepare(`SELECT * FROM jobs WHERE last_error IS NOT NULL AND status != 'done'
                              ORDER BY timestamp DESC LIMIT ?`),
+      resetBackfill: prepare("DELETE FROM settings WHERE key LIKE 'backfill:%'"),
       getSetting: prepare('SELECT value FROM settings WHERE key = ?'),
       setSetting: prepare(`INSERT INTO settings (key, value) VALUES (?, ?)
                            ON CONFLICT(key) DO UPDATE SET value = excluded.value`),
@@ -101,6 +102,11 @@ export class SqliteJobRepository {
 
   recentErrors(limit = 5) {
     return this.#sql.recentErrors.all(limit).map(toJob);
+  }
+
+  /** Forgets completed history scans, so the next start scans again. */
+  resetBackfill() {
+    return this.#sql.resetBackfill.run().changes;
   }
 
   isPaused() {
